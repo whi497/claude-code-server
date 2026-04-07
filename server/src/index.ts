@@ -72,59 +72,68 @@ function jobAddLog(jobId: string, entry: Omit<LogEntry, 'timestamp'>) {
   broadcast('job:log', { jobId, log });
 }
 
-function createApprovalHook(jobId: string, projectId: string) {
-  return async (input: any, _toolUseId: string | undefined) => {
-    let type: ApprovalType;
-    let content: string;
-    let options: Array<{ label: string; description?: string }> | undefined;
+// Create a canUseTool callback that intercepts AskUserQuestion and ExitPlanMode.
+// canUseTool is the correct SDK mechanism — it pauses the agent until we return.
+// Returns a PermissionResult: { behavior: 'allow', updatedInput? } | { behavior: 'deny', message }
+function createCanUseTool(jobId: string, projectId: string) {
+  return async (toolName: string, input: Record<string, unknown>, _options: any): Promise<any> => {
+    // AskUserQuestion: intercept, surface to UI, wait for user answer
+    if (toolName === 'AskUserQuestion') {
+      const questions = (input.questions as any[]) ?? [];
+      const firstQ = questions[0];
+      const content = firstQ?.question ?? JSON.stringify(input);
+      const options = Array.isArray(firstQ?.options) ? firstQ.options : undefined;
 
-    switch (input.tool_name) {
-      case 'AskUserQuestion':
-        type = 'question';
-        content = input.tool_input?.question ?? input.tool_input?.questions?.[0]?.question ?? JSON.stringify(input.tool_input);
-        if (Array.isArray(input.tool_input?.questions?.[0]?.options)) {
-          options = input.tool_input.questions[0].options;
-        } else if (Array.isArray(input.tool_input?.options)) {
-          options = input.tool_input.options;
-        }
-        break;
-      case 'ExitPlanMode': {
-        type = 'plan_exit';
-        // Collect recent text logs from the job as the plan content
-        const job = jobs.find(j => j.id === jobId);
-        const textLogs = (job?.logs ?? []).filter(l => l.type === 'text');
-        // Take the last text logs as plan content (Claude writes the plan before calling ExitPlanMode)
-        const planText = textLogs.slice(-10).map(l => l.content).join('\n\n');
-        content = planText || 'Claude has finished planning and wants to begin execution.';
-        break;
-      }
-      default:
-        // EnterPlanMode and others: auto-allow, no approval needed
-        return {};
+      const approval: ApprovalRequest = {
+        id: uuid(), jobId, projectId, type: 'question', status: 'pending',
+        content, toolInput: input, options,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      approvals.push(approval);
+      broadcast('approval:created', approval);
+      jobAddLog(jobId, {
+        type: 'system',
+        content: `⏳ Claude is asking: "${content.slice(0, 100)}${content.length > 100 ? '...' : ''}"`,
+        meta: { approvalId: approval.id },
+      });
+
+      // Block until user responds via REST
+      return new Promise<any>((resolve) => {
+        pendingResolvers.set(approval.id, resolve);
+      });
     }
 
-    const approval: ApprovalRequest = {
-      id: uuid(), jobId, projectId, type, status: 'pending',
-      content, toolInput: input.tool_input ?? {}, options,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
+    // ExitPlanMode: intercept, show plan for approval
+    if (toolName === 'ExitPlanMode') {
+      const job = jobs.find(j => j.id === jobId);
+      const textLogs = (job?.logs ?? []).filter(l => l.type === 'text');
+      const planText = textLogs.slice(-10).map(l => l.content).join('\n\n');
+      const content = planText || 'Claude has finished planning and wants to begin execution.';
 
-    approvals.push(approval);
-    broadcast('approval:created', approval);
+      const approval: ApprovalRequest = {
+        id: uuid(), jobId, projectId, type: 'plan_exit', status: 'pending',
+        content, toolInput: input,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
 
-    jobAddLog(jobId, {
-      type: 'system',
-      content: type === 'question'
-        ? `⏳ Claude is asking: "${content.slice(0, 100)}${content.length > 100 ? '...' : ''}"`
-        : `⏳ Claude has finished planning and is requesting approval to proceed`,
-      meta: { approvalId: approval.id },
-    });
+      approvals.push(approval);
+      broadcast('approval:created', approval);
+      jobAddLog(jobId, {
+        type: 'system',
+        content: `⏳ Claude has finished planning and is requesting approval to proceed`,
+        meta: { approvalId: approval.id },
+      });
 
-    // Block until user responds via REST
-    return new Promise<any>((resolve) => {
-      pendingResolvers.set(approval.id, resolve);
-    });
+      return new Promise<any>((resolve) => {
+        pendingResolvers.set(approval.id, resolve);
+      });
+    }
+
+    // All other tools: auto-allow (permissionMode: bypassPermissions handles most)
+    return { behavior: 'allow' };
   };
 }
 
@@ -140,36 +149,36 @@ function resolveApproval(id: string, response: ApprovalResponse) {
   approval.respondedAt = now;
   approval.updatedAt = now;
 
-  let hookResult: any;
+  // Build PermissionResult for canUseTool callback
+  let result: any;
   switch (response.action) {
-    case 'answer':
+    case 'answer': {
       approval.status = 'answered';
-      hookResult = {
-        hookSpecificOutput: {
-          hookEventName: 'PreToolUse',
-          permissionDecision: 'allow',
-          updatedInput: { ...approval.toolInput, answer: response.text },
+      // Build answers map: { "question text": "selected label/answer text" }
+      const questions = (approval.toolInput.questions as any[]) ?? [];
+      const answers: Record<string, string> = {};
+      if (questions.length > 0) {
+        // Map each question to the user's answer
+        answers[questions[0].question] = response.text!;
+      }
+      result = {
+        behavior: 'allow',
+        updatedInput: {
+          questions: approval.toolInput.questions,  // echo back original questions
+          answers,                                   // { "question text": "answer" }
         },
       };
       break;
+    }
     case 'approve':
       approval.status = 'approved';
-      hookResult = {
-        hookSpecificOutput: {
-          hookEventName: 'PreToolUse',
-          permissionDecision: 'allow',
-        },
-      };
+      result = { behavior: 'allow' };
       break;
     case 'reject':
       approval.status = 'rejected';
-      hookResult = {
-        systemMessage: response.text ? `User rejected: "${response.text}"` : 'User rejected this action.',
-        hookSpecificOutput: {
-          hookEventName: 'PreToolUse',
-          permissionDecision: 'deny',
-          permissionDecisionReason: response.text || 'User rejected',
-        },
+      result = {
+        behavior: 'deny',
+        message: response.text || 'User rejected this action.',
       };
       break;
   }
@@ -184,7 +193,7 @@ function resolveApproval(id: string, response: ApprovalResponse) {
   });
 
   pendingResolvers.delete(id);
-  resolver(hookResult);
+  resolver(result);
 
   // Prune resolved approvals beyond 100
   const resolved = approvals.filter(a => a.status !== 'pending');
@@ -205,12 +214,7 @@ function expirePendingApprovals(jobId: string) {
       const resolver = pendingResolvers.get(a.id);
       if (resolver) {
         pendingResolvers.delete(a.id);
-        resolver({
-          hookSpecificOutput: {
-            hookEventName: 'PreToolUse',
-            permissionDecision: 'deny',
-          },
-        });
+        resolver({ behavior: 'deny', message: 'Job ended — approval expired' });
       }
       broadcast('approval:updated', a);
     }
@@ -262,12 +266,7 @@ async function runJob(job: Job) {
       allowDangerouslySkipPermissions: true,
       includePartialMessages: false,
       thinking: { type: 'disabled' },
-      hooks: {
-        PreToolUse: [{
-          matcher: 'AskUserQuestion|ExitPlanMode',
-          hooks: [createApprovalHook(job.id, job.projectId)],
-        }],
-      },
+      canUseTool: createCanUseTool(job.id, job.projectId),
       systemPrompt: {
         type: 'preset',
         preset: 'claude_code',
@@ -839,18 +838,91 @@ app.put('/api/projects/:id/memories', (req, res) => {
 });
 
 // ── Cron / Scheduled Tasks API ─────────────────────────────────
+// Reconstruct cron state from job logs (CronCreate/CronDelete tool calls + results)
+function extractCronFromLogs(job: Job): any[] {
+  const created = new Map<string, any>();
+  const logs = job.logs;
+
+  for (let i = 0; i < logs.length; i++) {
+    const log = logs[i];
+    if (log.type !== 'tool') continue;
+    const toolName = log.content.replace(/^🔧\s*/, '');
+    const input = log.meta?.input as Record<string, unknown> | undefined;
+    if (!input) continue;
+
+    // Find the matching tool_result (next tool_result log after this tool log)
+    let resultContent: string | undefined;
+    for (let j = i + 1; j < logs.length; j++) {
+      if (logs[j].type === 'tool_result') {
+        resultContent = logs[j].content;
+        break;
+      }
+      if (logs[j].type === 'tool') break; // hit next tool, no result
+    }
+
+    if (toolName === 'CronCreate') {
+      // Parse job ID from result (often JSON with an id field)
+      let jobId: string | undefined;
+      if (resultContent) {
+        try {
+          const parsed = JSON.parse(resultContent);
+          jobId = parsed.id ?? parsed.jobId;
+        } catch {
+          // result might be plain text like "Created job abc123"
+          const match = resultContent.match(/\b([a-f0-9-]{8,})\b/);
+          if (match) jobId = match[1];
+        }
+      }
+      const id = jobId ?? `unknown-${i}`;
+      created.set(id, {
+        id,
+        cron: input.cron,
+        prompt: input.prompt,
+        recurring: input.recurring !== false,
+        durable: input.durable === true,
+        createdAt: log.timestamp,
+        source: 'session',
+      });
+    } else if (toolName === 'CronDelete') {
+      const id = input.id as string;
+      if (id) created.delete(id);
+    }
+  }
+
+  return Array.from(created.values());
+}
+
 app.get('/api/projects/:id/cron', (req, res) => {
   const project = projects.find(p => p.id === req.params.id);
   if (!project) return res.status(404).json({ error: 'not found' });
 
+  // 1. File-based durable tasks
   const cronPath = path.join(project.path, '.claude', 'scheduled_tasks.json');
+  let fileTasks: any[] = [];
   try {
     const data = JSON.parse(fs.readFileSync(cronPath, 'utf-8'));
-    const tasks = Array.isArray(data) ? data : (data.tasks ?? []);
-    res.json({ path: cronPath, tasks });
-  } catch {
-    res.json({ path: cronPath, tasks: [] });
+    fileTasks = (Array.isArray(data) ? data : (data.tasks ?? [])).map((t: any) => ({ ...t, source: 'file' }));
+  } catch {}
+
+  // 2. Session-derived tasks from job logs (for the requested job, or all project jobs)
+  const { jobId } = req.query;
+  const targetJobs = jobId
+    ? jobs.filter(j => j.id === jobId)
+    : jobs.filter(j => j.projectId === project.id && (j.status === 'running' || j.status === 'idle'));
+  const sessionTasks: any[] = [];
+  for (const j of targetJobs) {
+    const extracted = extractCronFromLogs(j);
+    sessionTasks.push(...extracted.map(t => ({ ...t, jobId: j.id })));
   }
+
+  // Deduplicate: file tasks take precedence by id
+  const seen = new Set(fileTasks.map((t: any) => t.id).filter(Boolean));
+  const merged = [
+    ...fileTasks,
+    ...sessionTasks.filter(t => !seen.has(t.id)),
+  ];
+
+  res.json({ path: cronPath, tasks: merged });
 });
 
 // ── HTTP + WebSocket server ─────────────────────────────────────
