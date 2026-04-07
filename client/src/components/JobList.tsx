@@ -34,8 +34,13 @@ export function JobList({ jobs, selectedJobId, onSelect }: Props) {
         >
           <div className="job-card-header">
             <span className={`badge badge-${j.status}`}>
-              {j.status === 'running' ? <span className="running-indicator">{j.status}</span> : j.status}
+              {j.status === 'running' ? <span className="running-indicator">{j.status}</span>
+                : j.status === 'idle' ? <span className="running-indicator">● session</span>
+                : j.status}
             </span>
+            {j.mode === 'session' && j.status !== 'idle' && j.status !== 'running' && (
+              <span style={{ fontSize: 9, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>session</span>
+            )}
           </div>
           <div className="prompt">{j.prompt}</div>
           <div className="meta">

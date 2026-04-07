@@ -1,4 +1,4 @@
-export type JobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'archived';
+export type JobStatus = 'queued' | 'running' | 'idle' | 'completed' | 'failed' | 'archived';
 
 export interface Project {
   id: string;
@@ -19,12 +19,13 @@ export interface Job {
   error?: string;
   costUsd?: number;
   tokenUsage?: { input: number; output: number };
+  mode?: 'job' | 'session';
   logs: LogEntry[];
 }
 
 export interface LogEntry {
   timestamp: string;
-  type: 'text' | 'tool' | 'tool_result' | 'system' | 'error' | 'result';
+  type: 'text' | 'tool' | 'tool_result' | 'system' | 'error' | 'result' | 'user';
   content: string;
   meta?: Record<string, unknown>;
 }

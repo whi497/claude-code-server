@@ -24,7 +24,10 @@ const STATE_FILE = path.join(PROJECTS_ROOT, '.state.json');
 // ── In-memory state (persisted to disk) ─────────────────────────
 let projects: Project[] = [];
 let jobs: Job[] = [];
-const activeQueries = new Map<string, { abort: AbortController }>();
+const activeQueries = new Map<string, {
+  abort: AbortController;
+  channel?: { push: (msg: any) => void; close: () => void };
+}>();
 
 function saveState() {
   fs.mkdirSync(PROJECTS_ROOT, { recursive: true });
@@ -38,8 +41,9 @@ function loadState() {
       projects = data.projects ?? [];
       jobs = (data.jobs ?? []).map((j: Job) => ({
         ...j,
-        // Mark previously running jobs as failed on restart
-        status: j.status === 'running' ? 'failed' as JobStatus : j.status,
+        // Mark previously running/idle jobs as failed on restart (sessions lost)
+        status: (j.status === 'running' || j.status === 'idle') ? 'failed' as JobStatus : j.status,
+        error: (j.status === 'running' || j.status === 'idle') ? (j.error ?? 'Server restarted — session lost') : j.error,
       }));
     }
   } catch { /* start fresh */ }
@@ -174,6 +178,209 @@ async function runJob(job: Job) {
   }
 }
 
+// ── Pushable async generator for streaming input ────────────────
+// The SDK expects an AsyncGenerator (yield-based), not a ReadableStream.
+// This creates a generator that can be externally pushed to via push() and closed via close().
+function createMessageChannel() {
+  const queue: any[] = [];
+  let resolve: (() => void) | null = null;
+  let done = false;
+
+  const push = (msg: any) => {
+    if (done) return;
+    queue.push(msg);
+    if (resolve) { resolve(); resolve = null; }
+  };
+
+  const close = () => {
+    done = true;
+    if (resolve) { resolve(); resolve = null; }
+  };
+
+  async function* generator(): AsyncGenerator<any, void> {
+    while (true) {
+      if (queue.length > 0) {
+        const msg = queue.shift()!;
+        console.log('[session-gen] yielding message:', JSON.stringify(msg).slice(0, 100));
+        yield msg;
+      } else if (done) {
+        console.log('[session-gen] generator done, returning');
+        return;
+      } else {
+        console.log('[session-gen] queue empty, waiting for push...');
+        await new Promise<void>(r => { resolve = r; });
+        console.log('[session-gen] push received, continuing loop');
+      }
+    }
+  }
+
+  return { push, close, generator: generator() };
+}
+
+// ── Agent SDK session runner (long-running) ─────────────────────
+async function runSessionJob(job: Job) {
+  const project = projects.find(p => p.id === job.projectId);
+  if (!project) {
+    job.status = 'failed';
+    job.error = 'Project not found';
+    job.updatedAt = new Date().toISOString();
+    broadcast('job:updated', job);
+    saveState();
+    return;
+  }
+
+  const cwd = project.path;
+  fs.mkdirSync(cwd, { recursive: true });
+
+  job.status = 'running';
+  job.updatedAt = new Date().toISOString();
+  broadcast('job:updated', job);
+  saveState();
+
+  const abortController = new AbortController();
+
+  // Streaming input via pushable async generator
+  const channel = createMessageChannel();
+
+  activeQueries.set(job.id, { abort: abortController, channel });
+
+  const addLog = (entry: Omit<LogEntry, 'timestamp'>) => {
+    const log: LogEntry = { ...entry, timestamp: new Date().toISOString() };
+    job.logs.push(log);
+    broadcast('job:log', { jobId: job.id, log });
+  };
+
+  try {
+    const opts: Parameters<typeof query>[0]['options'] = {
+      cwd,
+      abortController,
+      pathToClaudeCodeExecutable: CLAUDE_CLI_PATH,
+      allowedTools: ['Read', 'Edit', 'Write', 'Bash', 'Glob', 'Grep', 'WebSearch', 'WebFetch'],
+      disallowedTools: ['AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode'],
+      permissionMode: 'bypassPermissions' as const,
+      allowDangerouslySkipPermissions: true,
+      includePartialMessages: false,
+      thinking: { type: 'disabled' },
+      systemPrompt: {
+        type: 'preset',
+        preset: 'claude_code',
+        append: 'IMPORTANT: You are running in a persistent long-running session mode on a headless server. There is NO human operator to interact with. You MUST NOT use AskUserQuestion, EnterPlanMode, or ExitPlanMode tools — they are unavailable. This session stays alive between user prompts — cron jobs, scheduled tasks, and background work you create will persist. Make reasonable decisions autonomously and proceed with execution directly.',
+      },
+    };
+
+    // Resume session if available
+    if (job.sessionId) {
+      (opts as any).resume = job.sessionId;
+    }
+
+    addLog({ type: 'system', content: `Starting session in ${cwd}` });
+    addLog({ type: 'user', content: job.prompt });
+
+    // Push the first user message into the generator
+    channel.push({
+      type: 'user' as const,
+      message: { role: 'user' as const, content: job.prompt },
+    });
+
+    // Add stderr capture for debugging
+    (opts as any).stderr = (data: string) => {
+      console.error(`[session-stderr] ${data.trim()}`);
+    };
+
+    // Process messages — loop stays alive until generator is closed or aborted
+    console.log('[session] starting query with streaming input');
+    for await (const message of query({ prompt: channel.generator, options: opts })) {
+      const msg = message as any;
+      console.log('[session-msg]', msg.type, msg.subtype ?? '', msg.state ?? '');
+
+      // Capture session ID from init
+      if (msg.type === 'system' && msg.subtype === 'init') {
+        job.sessionId = msg.session_id;
+        addLog({ type: 'system', content: `Session: ${msg.session_id} | Model: ${msg.model}` });
+      }
+
+      // Session state changes — supplementary signal (not emitted by SDK v0.2.92,
+      // but kept for forward-compat with future SDK versions).
+      // Primary idle detection is via the 'result' event above.
+      if (msg.type === 'system' && msg.subtype === 'session_state_changed') {
+        if (msg.state === 'idle' && job.status !== 'idle') {
+          job.status = 'idle';
+          job.updatedAt = new Date().toISOString();
+          broadcast('job:updated', job);
+          saveState();
+        } else if (msg.state === 'running' && job.status !== 'running') {
+          job.status = 'running';
+          job.updatedAt = new Date().toISOString();
+          broadcast('job:updated', job);
+        }
+      }
+
+      // Assistant messages
+      if (msg.type === 'assistant' && msg.message?.content) {
+        for (const block of msg.message.content) {
+          if (block.type === 'text' && block.text) {
+            addLog({ type: 'text', content: block.text });
+          } else if (block.type === 'tool_use') {
+            addLog({
+              type: 'tool',
+              content: `🔧 ${block.name}`,
+              meta: { input: block.input },
+            });
+          }
+        }
+      }
+
+      // Tool results (user messages with tool results)
+      if (msg.type === 'user' && msg.tool_use_result !== undefined) {
+        const resultStr = typeof msg.tool_use_result === 'string'
+          ? msg.tool_use_result
+          : JSON.stringify(msg.tool_use_result).slice(0, 2000);
+        addLog({ type: 'tool_result', content: resultStr, meta: { tool_use_id: msg.tool_use_id } });
+      }
+
+      // Turn result — emitted after EACH turn (not just on generator close).
+      // In streaming mode the session stays alive; set 'idle' so the client
+      // knows it can send the next message.  'completed' is set in finally{}.
+      if (msg.type === 'result') {
+        if (msg.subtype === 'success') {
+          job.status = 'idle';
+          job.result = msg.result;
+          job.costUsd = msg.total_cost_usd;
+          job.tokenUsage = {
+            input: msg.usage?.input_tokens ?? 0,
+            output: msg.usage?.output_tokens ?? 0,
+          };
+          addLog({ type: 'result', content: msg.result ?? 'Turn complete' });
+          saveState();
+        } else {
+          job.status = 'failed';
+          job.error = msg.errors?.join('; ') ?? msg.subtype;
+          addLog({ type: 'error', content: job.error! });
+        }
+      }
+
+      job.updatedAt = new Date().toISOString();
+      broadcast('job:updated', job);
+    }
+  } catch (err: any) {
+    job.status = 'failed';
+    job.error = err.message ?? String(err);
+    addLog({ type: 'error', content: job.error! });
+  } finally {
+    activeQueries.delete(job.id);
+    channel.close();
+    // Only mark completed if the session ended normally (idle or running).
+    // If it already failed (catch block / error result), keep that status.
+    if (job.status === 'idle' || job.status === 'running') {
+      job.status = 'completed';
+      addLog({ type: 'system', content: 'Session ended' });
+    }
+    job.updatedAt = new Date().toISOString();
+    broadcast('job:updated', job);
+    saveState();
+  }
+}
+
 // ── Express app ─────────────────────────────────────────────────
 const app = express();
 app.use(cors());
@@ -223,7 +430,7 @@ app.get('/api/jobs/:id', (req, res) => {
 });
 
 app.post('/api/jobs', (req, res) => {
-  const { projectId, prompt } = req.body;
+  const { projectId, prompt, mode } = req.body;
   if (!projectId || !prompt) return res.status(400).json({ error: 'projectId and prompt required' });
   if (!projects.find(p => p.id === projectId)) return res.status(404).json({ error: 'project not found' });
 
@@ -232,6 +439,7 @@ app.post('/api/jobs', (req, res) => {
     projectId,
     prompt,
     status: 'queued',
+    mode: mode === 'session' ? 'session' : 'job',
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     logs: [],
@@ -240,21 +448,58 @@ app.post('/api/jobs', (req, res) => {
   saveState();
   broadcast('job:created', job);
 
-  // Start immediately
-  runJob(job);
+  // Start immediately — route by mode
+  if (job.mode === 'session') {
+    runSessionJob(job);
+  } else {
+    runJob(job);
+  }
 
   res.status(201).json(job);
 });
 
-// Resume a completed/failed job with a follow-up prompt
+// Resume a completed/failed job OR send message to live session
 app.post('/api/jobs/:id/continue', (req, res) => {
   const job = jobs.find(j => j.id === req.params.id);
   if (!job) return res.status(404).json({ error: 'not found' });
-  if (job.status === 'running') return res.status(409).json({ error: 'already running' });
 
   const { prompt } = req.body;
+  const message = prompt ?? 'Continue from where you left off.';
+
+  // Session mode: send message to live subprocess
+  if (job.mode === 'session' && job.status === 'idle') {
+    const session = activeQueries.get(job.id);
+    if (session?.channel) {
+      // Log the user message
+      const log: LogEntry = { type: 'user', content: message, timestamp: new Date().toISOString() };
+      job.logs.push(log);
+      broadcast('job:log', { jobId: job.id, log });
+
+      // Push to the live async generator
+      session.channel.push({
+        type: 'user' as const,
+        message: { role: 'user' as const, content: message },
+      });
+
+      job.status = 'running';
+      job.updatedAt = new Date().toISOString();
+      broadcast('job:updated', job);
+      saveState();
+      return res.status(200).json(job);
+    }
+    // Session is idle but no active query — subprocess was lost
+    // Fall through to the restart-with-resume path below
+    job.status = 'failed';
+    job.error = 'Session process lost';
+  }
+
+  // Original behavior: spawn new subprocess with resume
+  if (job.status === 'running' || job.status === 'idle') {
+    return res.status(409).json({ error: 'job is active' });
+  }
+
   // Reset existing job for continuation (no duplicate)
-  job.prompt = prompt ?? 'Continue from where you left off.';
+  job.prompt = message;
   job.status = 'queued';
   job.result = undefined;
   job.error = undefined;
@@ -265,7 +510,12 @@ app.post('/api/jobs/:id/continue', (req, res) => {
   job.logs.push({ type: 'system', content: '── Continue ──', timestamp: new Date().toISOString() });
   saveState();
   broadcast('job:updated', job);
-  runJob(job);
+
+  if (job.mode === 'session') {
+    runSessionJob(job);
+  } else {
+    runJob(job);
+  }
   res.status(200).json(job);
 });
 
@@ -273,9 +523,12 @@ app.post('/api/jobs/:id/continue', (req, res) => {
 app.post('/api/jobs/:id/archive', (req, res) => {
   const job = jobs.find(j => j.id === req.params.id);
   if (!job) return res.status(404).json({ error: 'not found' });
-  if (job.status === 'running') {
+  if (job.status === 'running' || job.status === 'idle') {
     const q = activeQueries.get(job.id);
-    if (q) q.abort.abort();
+    if (q) {
+      if (q.channel) { q.channel.close(); }
+      q.abort.abort();
+    }
   }
   job.status = 'archived';
   job.updatedAt = new Date().toISOString();
@@ -284,18 +537,35 @@ app.post('/api/jobs/:id/archive', (req, res) => {
   res.json(job);
 });
 
-// Stop a running job
+// Stop a running/idle job
 app.post('/api/jobs/:id/stop', (req, res) => {
   const job = jobs.find(j => j.id === req.params.id);
   if (!job) return res.status(404).json({ error: 'not found' });
   const q = activeQueries.get(job.id);
   if (q) {
+    if (q.channel) { q.channel.close(); }
     q.abort.abort();
     job.status = 'failed';
     job.error = 'Manually stopped';
     job.updatedAt = new Date().toISOString();
     saveState();
     broadcast('job:updated', job);
+  }
+  res.json(job);
+});
+
+// Gracefully close a long-running session
+app.post('/api/jobs/:id/close-session', (req, res) => {
+  const job = jobs.find(j => j.id === req.params.id);
+  if (!job) return res.status(404).json({ error: 'not found' });
+  if (job.mode !== 'session') return res.status(400).json({ error: 'not a session job' });
+
+  const session = activeQueries.get(job.id);
+  if (session?.channel) {
+    const log: LogEntry = { type: 'system', content: 'Session closing...', timestamp: new Date().toISOString() };
+    job.logs.push(log);
+    broadcast('job:log', { jobId: job.id, log });
+    session.channel.close();
   }
   res.json(job);
 });

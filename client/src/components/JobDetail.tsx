@@ -35,6 +35,13 @@ function groupLogsIntoChatMessages(logs: LogEntry[], isRunning: boolean): ChatMe
   for (const log of logs) {
     if (log.type === 'system') continue; // hide system messages
 
+    if (log.type === 'user') {
+      flush();
+      current = { role: 'user', text: log.content, toolCalls: [], timestamp: log.timestamp };
+      flush();
+      continue;
+    }
+
     if (log.type === 'text') {
       if (!current || current.role !== 'assistant' || current.isResult) {
         flush();
@@ -218,9 +225,16 @@ export function JobDetail({ job, logs, projectId }: Props) {
 
   const handleStop = () => api.stopJob(job.id).catch(console.error);
   const handleArchive = () => api.archiveJob(job.id).catch(console.error);
-  const handleContinue = () => {
+  const handleCloseSession = () => api.closeSession(job.id).catch(console.error);
+  const handleSend = () => {
     if (!followUp.trim()) return;
-    api.continueJob(job.id, followUp).then(() => setFollowUp('')).catch(console.error);
+    const isSession = job.mode === 'session';
+    const isIdle = job.status === 'idle';
+    if (isSession && isIdle) {
+      api.continueJob(job.id, followUp).then(() => setFollowUp('')).catch(console.error);
+    } else {
+      api.continueJob(job.id, followUp).then(() => setFollowUp('')).catch(console.error);
+    }
   };
 
   const loadFile = (filePath: string) => {
@@ -228,7 +242,11 @@ export function JobDetail({ job, logs, projectId }: Props) {
   };
 
   const isRunning = job.status === 'running';
-  const canContinue = (job.status === 'completed' || job.status === 'failed') && !!job.sessionId;
+  const isIdle = job.status === 'idle';
+  const isSession = job.mode === 'session';
+  const canSendMessage = isSession && isIdle;
+  const canContinue = !isSession && (job.status === 'completed' || job.status === 'failed') && !!job.sessionId;
+  const showInput = canSendMessage || canContinue;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
@@ -237,17 +255,27 @@ export function JobDetail({ job, logs, projectId }: Props) {
         <div className="flex items-center justify-between mb-2">
           <div className="flex items-center gap-3">
             <span className={`badge badge-${job.status}`}>
-              {isRunning ? <span className="running-indicator">{job.status}</span> : job.status}
+              {isRunning ? <span className="running-indicator">{job.status}</span>
+                : isIdle ? <span className="running-indicator">● session</span>
+                : job.status}
             </span>
             <span className="text-sm text-muted font-mono">{job.id.slice(0, 8)}</span>
           </div>
           <div className="flex gap-2">
-            {isRunning && (
+            {isIdle && isSession && (
+              <span className="session-indicator">Session Active</span>
+            )}
+            {(isRunning || isIdle) && (
               <button className="btn btn-danger btn-sm" onClick={handleStop}>
                 <Square size={12} /> Stop
               </button>
             )}
-            {job.status !== 'archived' && !isRunning && (
+            {isSession && isIdle && (
+              <button className="btn btn-sm" onClick={handleCloseSession}>
+                Close Session
+              </button>
+            )}
+            {job.status !== 'archived' && !isRunning && !isIdle && (
               <button className="btn btn-sm" onClick={handleArchive}>
                 <Archive size={12} /> Archive
               </button>
@@ -293,7 +321,7 @@ export function JobDetail({ job, logs, projectId }: Props) {
               {chatMessages.map((msg, i) => (
                 <div key={i} className={`chat-message chat-message-${msg.role} ${msg.isResult ? 'chat-message-result' : ''} ${msg.isError ? 'chat-message-error' : ''}`}>
                   <div className="chat-message-header">
-                    <span className="chat-message-role">Claude</span>
+                    <span className="chat-message-role">{msg.role === 'user' ? 'You' : 'Claude'}</span>
                     <span className="chat-message-time">{formatTime(msg.timestamp)}</span>
                   </div>
                   {msg.text && (
@@ -324,17 +352,17 @@ export function JobDetail({ job, logs, projectId }: Props) {
               )}
             </div>
 
-            {canContinue && (
+            {showInput && (
               <div className="flex gap-2" style={{ marginTop: 12 }}>
                 <input
                   className="input flex-1"
-                  placeholder="Send follow-up prompt..."
+                  placeholder={canSendMessage ? 'Send message to session...' : 'Send follow-up prompt...'}
                   value={followUp}
                   onChange={e => setFollowUp(e.target.value)}
-                  onKeyDown={e => e.key === 'Enter' && handleContinue()}
+                  onKeyDown={e => e.key === 'Enter' && handleSend()}
                 />
-                <button className="btn btn-primary" onClick={handleContinue} disabled={!followUp.trim()}>
-                  <Play size={12} /> Continue
+                <button className="btn btn-primary" onClick={handleSend} disabled={!followUp.trim()}>
+                  <Play size={12} /> {canSendMessage ? 'Send' : 'Continue'}
                 </button>
               </div>
             )}
@@ -358,17 +386,17 @@ export function JobDetail({ job, logs, projectId }: Props) {
               ))}
             </div>
 
-            {canContinue && (
+            {showInput && (
               <div className="flex gap-2" style={{ marginTop: 12 }}>
                 <input
                   className="input flex-1"
-                  placeholder="Send follow-up prompt to continue session..."
+                  placeholder={canSendMessage ? 'Send message to session...' : 'Send follow-up prompt to continue session...'}
                   value={followUp}
                   onChange={e => setFollowUp(e.target.value)}
-                  onKeyDown={e => e.key === 'Enter' && handleContinue()}
+                  onKeyDown={e => e.key === 'Enter' && handleSend()}
                 />
-                <button className="btn btn-primary" onClick={handleContinue} disabled={!followUp.trim()}>
-                  <Play size={12} /> Continue
+                <button className="btn btn-primary" onClick={handleSend} disabled={!followUp.trim()}>
+                  <Play size={12} /> {canSendMessage ? 'Send' : 'Continue'}
                 </button>
               </div>
             )}

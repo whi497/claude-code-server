@@ -10,6 +10,7 @@ interface Props {
 
 export function NewJobModal({ projectId, onClose, onCreated }: Props) {
   const [prompt, setPrompt] = useState('');
+  const [sessionMode, setSessionMode] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -18,7 +19,7 @@ export function NewJobModal({ projectId, onClose, onCreated }: Props) {
     setLoading(true);
     setError('');
     try {
-      const job = await api.createJob(projectId, prompt.trim());
+      const job = await api.createJob(projectId, prompt.trim(), sessionMode ? 'session' : undefined);
       onCreated(job);
     } catch (e: any) {
       setError(e.message);
@@ -42,6 +43,18 @@ export function NewJobModal({ projectId, onClose, onCreated }: Props) {
           rows={5}
           autoFocus
         />
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, cursor: 'pointer' }}>
+          <input
+            type="checkbox"
+            checked={sessionMode}
+            onChange={e => setSessionMode(e.target.checked)}
+            style={{ accentColor: 'var(--accent)' }}
+          />
+          <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>Long-running session</span>
+          <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+            — keeps process alive between prompts
+          </span>
+        </label>
         {error && <p style={{ color: 'var(--danger)', fontSize: 12, marginTop: 8 }}>{error}</p>}
         <div className="actions">
           <button className="btn" onClick={onClose}>Cancel</button>

@@ -194,6 +194,7 @@ body {
 .badge-failed { background: var(--danger-dim); color: var(--danger); }
 .badge-queued { background: var(--warning-dim); color: var(--warning); }
 .badge-archived { background: var(--bg-tertiary); color: var(--text-muted); }
+.badge-idle { background: #2d1b69; color: #a78bfa; }
 
 /* Job list */
 .job-card {
@@ -269,6 +270,7 @@ body {
 .log-line.log-system .content { color: var(--text-muted); font-style: italic; }
 .log-line.log-error .content { color: var(--danger); }
 .log-line.log-result .content { color: var(--accent); font-weight: 500; }
+.log-line.log-user .content { color: #a78bfa; font-weight: 500; }
 
 /* Running indicator */
 .running-indicator {
@@ -615,4 +617,40 @@ body {
 @keyframes typing {
   0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
   30% { opacity: 1; transform: translateY(-3px); }
+}
+
+/* Session indicator */
+.session-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-weight: 500;
+}
+
+.session-indicator::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pulse 2s ease-in-out infinite;
+}
+
+/* User messages in chat */
+.chat-message-user {
+  background: var(--info-dim);
+  border-color: rgba(96, 165, 250, 0.15);
+  margin-left: 60px;
+}
+
+.chat-message-user .chat-message-role {
+  color: var(--info);
+}
+
+/* Idle badge running indicator dot color (purple) */
+.badge-idle .running-indicator::before {
+  background: #a78bfa;
 }

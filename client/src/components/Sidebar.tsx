@@ -12,7 +12,7 @@ interface Props {
 
 export function Sidebar({ projects, jobs, selectedProjectId, connected, onSelectProject, onNewProject }: Props) {
   const jobCountFor = (pid: string) => jobs.filter(j => j.projectId === pid && j.status !== 'archived').length;
-  const runningFor = (pid: string) => jobs.filter(j => j.projectId === pid && j.status === 'running').length;
+  const runningFor = (pid: string) => jobs.filter(j => j.projectId === pid && (j.status === 'running' || j.status === 'idle')).length;
 
   return (
     <div className="sidebar">
