@@ -77,6 +77,8 @@ function jobAddLog(jobId: string, entry: Omit<LogEntry, 'timestamp'>) {
 // Returns a PermissionResult: { behavior: 'allow', updatedInput? } | { behavior: 'deny', message }
 function createCanUseTool(jobId: string, projectId: string) {
   return async (toolName: string, input: Record<string, unknown>, _options: any): Promise<any> => {
+    console.log(`[canUseTool] ${toolName} for job ${jobId}`);
+
     // AskUserQuestion: intercept, surface to UI, wait for user answer
     if (toolName === 'AskUserQuestion') {
       const questions = (input.questions as any[]) ?? [];
@@ -132,8 +134,8 @@ function createCanUseTool(jobId: string, projectId: string) {
       });
     }
 
-    // All other tools: auto-allow (permissionMode: bypassPermissions handles most)
-    return { behavior: 'allow' };
+    // All other tools: auto-allow with original input echoed back
+    return { behavior: 'allow', updatedInput: input };
   };
 }
 
@@ -172,7 +174,8 @@ function resolveApproval(id: string, response: ApprovalResponse) {
     }
     case 'approve':
       approval.status = 'approved';
-      result = { behavior: 'allow' };
+      // updatedInput is required by SDK Zod validation — echo back original input
+      result = { behavior: 'allow', updatedInput: { ...approval.toolInput } };
       break;
     case 'reject':
       approval.status = 'rejected';
@@ -192,6 +195,7 @@ function resolveApproval(id: string, response: ApprovalResponse) {
     meta: { approvalId: id },
   });
 
+  console.log(`[resolveApproval] ${id} action=${response.action} result=`, JSON.stringify(result));
   pendingResolvers.delete(id);
   resolver(result);
 
@@ -262,8 +266,8 @@ async function runJob(job: Job) {
       pathToClaudeCodeExecutable: CLAUDE_CLI_PATH,
       allowedTools: ['Read', 'Edit', 'Write', 'Bash', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode'],
       disallowedTools: [],
-      permissionMode: 'bypassPermissions' as const,
-      allowDangerouslySkipPermissions: true,
+      // No permissionMode: 'bypassPermissions' — canUseTool handles all permissions
+      // (bypassPermissions skips canUseTool entirely, preventing approval interception)
       includePartialMessages: false,
       thinking: { type: 'disabled' },
       canUseTool: createCanUseTool(job.id, job.projectId),
