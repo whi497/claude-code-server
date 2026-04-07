@@ -38,5 +38,5 @@ export const api = {
   saveMemory: (projectId: string, filePath: string, content: string) =>
     request(`/projects/${projectId}/memories`, { method: 'PUT', body: JSON.stringify({ filePath, content }) }),
   // Cron
-  getCron: (projectId: string) => request(`/projects/${projectId}/cron`),
+  getCron: (projectId: string, jobId?: string) => request(`/projects/${projectId}/cron${jobId ? `?jobId=${jobId}` : ''}`),
 };

@@ -270,8 +270,16 @@ body {
   font-size: 12px;
   line-height: 1.7;
   overflow-y: auto;
-  max-height: 60vh;
+  flex: 1;
+  min-height: 0;
   padding: 16px;
+}
+
+.output-tab-wrapper {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
 }
 
 .log-line {
@@ -443,8 +451,9 @@ body {
   padding: 20px 24px;
 }
 
-/* When chat tab is active, detail-body becomes flex to stretch chat-tab-wrapper */
-.detail-body:has(.chat-tab-wrapper) {
+/* When chat/output tab is active, detail-body becomes flex to stretch wrapper */
+.detail-body:has(.chat-tab-wrapper),
+.detail-body:has(.output-tab-wrapper) {
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -1227,6 +1236,17 @@ body {
 .cron-type-once {
   background: var(--warning-dim);
   color: var(--warning);
+}
+
+.cron-session-badge {
+  font-size: 9px;
+  font-family: var(--font-mono);
+  padding: 1px 6px;
+  border-radius: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  background: var(--info-dim);
+  color: var(--info);
 }
 
 .cron-durable-badge {
