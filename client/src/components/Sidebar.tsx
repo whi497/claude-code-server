@@ -1,4 +1,4 @@
-import { FolderOpen, Plus, MessageCircleQuestion, ClipboardCheck } from 'lucide-react';
+import { FolderOpen, Plus, MessageCircleQuestion, ClipboardCheck, Search } from 'lucide-react';
 import type { Project, Job, ApprovalRequest } from '../types';
 
 interface Props {
@@ -16,6 +16,8 @@ interface Props {
   onSelectApproval: (id: string) => void;
   onSelectApprovalView: () => void;
   onNewProject: () => void;
+  onOpenSearch?: () => void;
+  style?: React.CSSProperties;
 }
 
 const typeIcons: Record<string, typeof MessageCircleQuestion> = {
@@ -26,7 +28,7 @@ const typeIcons: Record<string, typeof MessageCircleQuestion> = {
 export function Sidebar({
   projects, jobs, approvals, pendingApprovals,
   selectedProjectId, selectedJobId, selectedApprovalId, isApprovalView,
-  connected, onSelectProject, onSelectJob, onSelectApproval, onSelectApprovalView, onNewProject,
+  connected, onSelectProject, onSelectJob, onSelectApproval, onSelectApprovalView, onNewProject, onOpenSearch, style,
 }: Props) {
   const jobCountFor = (pid: string) => jobs.filter(j => j.projectId === pid && j.status !== 'archived').length;
   const runningFor = (pid: string) => jobs.filter(j => j.projectId === pid && (j.status === 'running' || j.status === 'idle')).length;
@@ -34,10 +36,20 @@ export function Sidebar({
   const hasApprovals = approvals.length > 0;
 
   return (
-    <div className="sidebar">
+    <div className="sidebar" style={style}>
       <div className="sidebar-header">
         <div className={`dot ${connected ? '' : 'offline'}`} />
         <h1>CLAUDE CODE SERVER</h1>
+        {onOpenSearch && (
+          <button
+            className="cmd-palette-trigger"
+            onClick={onOpenSearch}
+            title="Search jobs (Cmd+K)"
+          >
+            <Search size={12} />
+            <kbd>K</kbd>
+          </button>
+        )}
       </div>
 
       {/* Approvals section */}

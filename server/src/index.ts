@@ -5,6 +5,8 @@ import cors from 'cors';
 import { v4 as uuid } from 'uuid';
 import fs from 'fs';
 import path from 'path';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { createRequire } from 'module';
 import type { Job, Project, LogEntry, JobStatus, ApprovalRequest, ApprovalResponse, ApprovalType } from './types.js';
@@ -32,6 +34,10 @@ const activeQueries = new Map<string, {
 // ── Approval state (ephemeral — not persisted) ──────────────────
 const approvals: ApprovalRequest[] = [];
 const pendingResolvers = new Map<string, (result: any) => void>();
+const approvalTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+// Auto-approve timeout for plan_exit approvals (in ms)
+const PLAN_APPROVAL_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
 function saveState() {
   fs.mkdirSync(PROJECTS_ROOT, { recursive: true });
@@ -107,12 +113,19 @@ function createCanUseTool(jobId: string, projectId: string) {
       });
     }
 
-    // ExitPlanMode: intercept, show plan for approval
+    // ExitPlanMode: intercept, show plan for approval (auto-approves after timeout)
+    // The SDK passes `input.plan` (full markdown) and `input.planFilePath` directly.
     if (toolName === 'ExitPlanMode') {
-      const job = jobs.find(j => j.id === jobId);
-      const textLogs = (job?.logs ?? []).filter(l => l.type === 'text');
-      const planText = textLogs.slice(-10).map(l => l.content).join('\n\n');
-      const content = planText || 'Claude has finished planning and wants to begin execution.';
+      const planMarkdown = typeof input.plan === 'string' ? input.plan : '';
+      const planFilePath = typeof input.planFilePath === 'string' ? input.planFilePath : '';
+      const content = planMarkdown
+        || 'Claude has finished planning and wants to begin execution.';
+
+      if (planMarkdown) {
+        console.log(`[ExitPlanMode] Plan from input.plan (${planMarkdown.length} chars), file: ${planFilePath || 'N/A'}`);
+      } else {
+        console.warn(`[ExitPlanMode] No plan text in input, using fallback message`);
+      }
 
       const approval: ApprovalRequest = {
         id: uuid(), jobId, projectId, type: 'plan_exit', status: 'pending',
@@ -123,11 +136,30 @@ function createCanUseTool(jobId: string, projectId: string) {
 
       approvals.push(approval);
       broadcast('approval:created', approval);
+      const timeoutMin = Math.round(PLAN_APPROVAL_TIMEOUT_MS / 60000);
       jobAddLog(jobId, {
         type: 'system',
-        content: `⏳ Claude has finished planning and is requesting approval to proceed`,
+        content: `⏳ Claude has finished planning and is requesting approval to proceed (auto-approves in ${timeoutMin}min if no response)`,
         meta: { approvalId: approval.id },
       });
+
+      // Set up auto-approve timer
+      const timer = setTimeout(() => {
+        approvalTimers.delete(approval.id);
+        if (approval.status !== 'pending') return; // already resolved
+        console.log(`[auto-approve] Plan approval ${approval.id} timed out after ${timeoutMin}min — auto-approving`);
+        try {
+          resolveApproval(approval.id, { action: 'approve', text: `Auto-approved after ${timeoutMin}min timeout` });
+          jobAddLog(jobId, {
+            type: 'system',
+            content: `✅ Plan auto-approved after ${timeoutMin}min timeout (no human response)`,
+            meta: { approvalId: approval.id },
+          });
+        } catch (err: any) {
+          console.error(`[auto-approve] Failed to auto-approve ${approval.id}:`, err.message);
+        }
+      }, PLAN_APPROVAL_TIMEOUT_MS);
+      approvalTimers.set(approval.id, timer);
 
       return new Promise<any>((resolve) => {
         pendingResolvers.set(approval.id, resolve);
@@ -145,6 +177,13 @@ function resolveApproval(id: string, response: ApprovalResponse) {
 
   const resolver = pendingResolvers.get(id);
   if (!resolver) throw new Error('No pending resolver for this approval');
+
+  // Clear auto-approve timer if it exists (manual response came before timeout)
+  const timer = approvalTimers.get(id);
+  if (timer) {
+    clearTimeout(timer);
+    approvalTimers.delete(id);
+  }
 
   const now = new Date().toISOString();
   approval.response = response.text;
@@ -215,6 +254,12 @@ function expirePendingApprovals(jobId: string) {
     if (a.jobId === jobId && a.status === 'pending') {
       a.status = 'expired';
       a.updatedAt = new Date().toISOString();
+      // Clear auto-approve timer if it exists
+      const timer = approvalTimers.get(a.id);
+      if (timer) {
+        clearTimeout(timer);
+        approvalTimers.delete(a.id);
+      }
       const resolver = pendingResolvers.get(a.id);
       if (resolver) {
         pendingResolvers.delete(a.id);
@@ -223,6 +268,53 @@ function expirePendingApprovals(jobId: string) {
       broadcast('approval:updated', a);
     }
   }
+}
+
+// ── Tool result content extraction ─────────────────────────────
+// Extract human-readable content from SDK tool results.
+// The SDK returns structured objects (e.g., { stdout, stderr } for Bash,
+// { file: { content } } for Read). We extract the meaningful text BEFORE
+// truncating, to avoid breaking JSON mid-string.
+const MAX_TOOL_RESULT_LENGTH = 50000;  // generous limit; client handles display truncation
+
+function extractToolResultContent(result: unknown): string {
+  if (typeof result === 'string') return result.slice(0, MAX_TOOL_RESULT_LENGTH);
+  if (result === null || result === undefined) return '(no output)';
+  if (typeof result !== 'object') return String(result);
+
+  const r = result as Record<string, any>;
+
+  // Bash: { stdout, stderr, interrupted, ... }
+  if ('stdout' in r || 'stderr' in r) {
+    const out = ((r.stdout || '') + (r.stderr ? '\nSTDERR:\n' + r.stderr : '')).trim();
+    return (out || '(no output)').slice(0, MAX_TOOL_RESULT_LENGTH);
+  }
+
+  // Read: { type: "text", file: { filePath, content, numLines, startLine, totalLines } }
+  if (r.file?.content !== undefined) {
+    // Preserve the full structured JSON so the client can extract filePath, lineInfo etc.
+    return JSON.stringify(result).slice(0, MAX_TOOL_RESULT_LENGTH);
+  }
+
+  // Glob: { filenames: [...], truncated: bool }
+  if (Array.isArray(r.filenames)) {
+    // Preserve structure for client parsing
+    return JSON.stringify(result).slice(0, MAX_TOOL_RESULT_LENGTH);
+  }
+
+  // Grep: { mode, filenames, content, numLines, ... }
+  if ('content' in r && typeof r.content === 'string') {
+    return JSON.stringify(result).slice(0, MAX_TOOL_RESULT_LENGTH);
+  }
+
+  // Write/Edit: { type: "create"|"update", filePath, ... }
+  if (r.filePath && (r.type === 'create' || r.type === 'update')) {
+    return JSON.stringify(result).slice(0, MAX_TOOL_RESULT_LENGTH);
+  }
+
+  // WebSearch, WebFetch, Agent, and other complex results: preserve structure
+  // Use a generous limit so the client can parse and render properly
+  return JSON.stringify(result).slice(0, MAX_TOOL_RESULT_LENGTH);
 }
 
 // ── Unified Agent SDK job runner (channel-based) ────────────────
@@ -343,10 +435,10 @@ async function runJob(job: Job) {
 
       // Tool results (user messages with tool results)
       if (msg.type === 'user' && msg.tool_use_result !== undefined) {
-        const resultStr = typeof msg.tool_use_result === 'string'
-          ? msg.tool_use_result
-          : JSON.stringify(msg.tool_use_result).slice(0, 2000);
-        addLog({ type: 'tool_result', content: resultStr, meta: { tool_use_id: msg.tool_use_id } });
+        const resultStr = extractToolResultContent(msg.tool_use_result);
+        // Extract tool_use_id from the message content (SDK stores it inside message.content[0].tool_use_id)
+        const toolUseId = (msg.message as any)?.content?.[0]?.tool_use_id ?? undefined;
+        addLog({ type: 'tool_result', content: resultStr, meta: { tool_use_id: toolUseId } });
       }
 
       // Turn result — mode-dependent behavior
@@ -630,6 +722,18 @@ app.post('/api/jobs/:id/archive', (req, res) => {
   res.json(job);
 });
 
+// Unarchive a job (restore to completed/failed)
+app.post('/api/jobs/:id/unarchive', (req, res) => {
+  const job = jobs.find(j => j.id === req.params.id);
+  if (!job) return res.status(404).json({ error: 'not found' });
+  if (job.status !== 'archived') return res.status(400).json({ error: 'job is not archived' });
+  job.status = job.error ? 'failed' : 'completed';
+  job.updatedAt = new Date().toISOString();
+  saveState();
+  broadcast('job:updated', job);
+  res.json(job);
+});
+
 // Stop a running/idle job
 app.post('/api/jobs/:id/stop', (req, res) => {
   const job = jobs.find(j => j.id === req.params.id);
@@ -724,6 +828,411 @@ app.get('/api/projects/:id/files/*', (req, res) => {
   } catch {
     res.status(404).json({ error: 'file not found' });
   }
+});
+
+// ── File Search API ───────────────────────────────────────────
+// Fuzzy search across file names and file content within a project
+app.get('/api/projects/:id/files-search', (req, res) => {
+  const project = projects.find(p => p.id === req.params.id);
+  if (!project) return res.status(404).json({ error: 'not found' });
+  const q = (req.query.q as string ?? '').trim().toLowerCase();
+  if (!q) return res.json({ files: [], contentMatches: [] });
+
+  const limit = Math.min(Number(req.query.limit) || 50, 200);
+  const searchContent = req.query.content !== 'false'; // search file content by default
+
+  // Collect all files recursively (respect same filters as file tree)
+  const allFiles: { name: string; path: string; isDir: boolean }[] = [];
+  const collectFiles = (dir: string, depth = 0) => {
+    if (depth > 5) return;
+    try {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const e of entries) {
+        if (e.name.startsWith('.') || e.name === 'node_modules') continue;
+        const relPath = path.relative(project.path, path.join(dir, e.name));
+        if (e.isDirectory()) {
+          allFiles.push({ name: e.name, path: relPath, isDir: true });
+          collectFiles(path.join(dir, e.name), depth + 1);
+        } else {
+          allFiles.push({ name: e.name, path: relPath, isDir: false });
+        }
+      }
+    } catch { /* skip unreadable dirs */ }
+  };
+  collectFiles(project.path);
+
+  // Fuzzy match helper: check if query chars appear in order in target
+  const fuzzyMatch = (target: string, query: string): { match: boolean; score: number } => {
+    const t = target.toLowerCase();
+    let qi = 0;
+    let score = 0;
+    let lastIdx = -1;
+    for (let i = 0; i < t.length && qi < query.length; i++) {
+      if (t[i] === query[qi]) {
+        // Consecutive bonus
+        score += (lastIdx === i - 1) ? 2 : 1;
+        // Start-of-word bonus
+        if (i === 0 || t[i - 1] === '/' || t[i - 1] === '.' || t[i - 1] === '-' || t[i - 1] === '_') {
+          score += 3;
+        }
+        lastIdx = i;
+        qi++;
+      }
+    }
+    return { match: qi === query.length, score };
+  };
+
+  // 1. Search file names (fuzzy)
+  const fileMatches = allFiles
+    .map(f => {
+      const { match, score } = fuzzyMatch(f.path, q);
+      return { ...f, score, match };
+    })
+    .filter(f => f.match)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map(({ match: _, score: __, ...rest }) => rest);
+
+  // 2. Search file content (substring match on each line)
+  const contentMatches: { path: string; line: number; text: string; }[] = [];
+  if (searchContent) {
+    const textExtensions = new Set([
+      '.ts', '.tsx', '.js', '.jsx', '.json', '.md', '.txt', '.css', '.html',
+      '.py', '.sh', '.yaml', '.yml', '.toml', '.cfg', '.ini', '.env',
+      '.rs', '.go', '.java', '.c', '.cpp', '.h', '.hpp', '.xml', '.svg',
+    ]);
+    for (const f of allFiles) {
+      if (f.isDir) continue;
+      if (contentMatches.length >= limit) break;
+      const ext = path.extname(f.name).toLowerCase();
+      if (!textExtensions.has(ext) && ext !== '') continue;
+      const fullPath = path.join(project.path, f.path);
+      try {
+        const stat = fs.statSync(fullPath);
+        if (stat.size > 512 * 1024) continue; // skip files > 512KB
+        const content = fs.readFileSync(fullPath, 'utf-8');
+        const lines = content.split('\n');
+        for (let i = 0; i < lines.length; i++) {
+          if (lines[i].toLowerCase().includes(q)) {
+            contentMatches.push({
+              path: f.path,
+              line: i + 1,
+              text: lines[i].trim().slice(0, 200),
+            });
+            if (contentMatches.length >= limit) break;
+          }
+        }
+      } catch { /* skip unreadable files */ }
+    }
+  }
+
+  res.json({ files: fileMatches, contentMatches });
+});
+
+// ── Git Management API ─────────────────────────────────────────
+const execFileAsync = promisify(execFile);
+
+async function gitExec(cwd: string, args: string[], maxBuffer = 1024 * 1024): Promise<{ stdout: string; stderr: string }> {
+  return execFileAsync('git', args, { cwd, maxBuffer, timeout: 30000 });
+}
+
+async function isGitRepo(cwd: string): Promise<boolean> {
+  try {
+    await gitExec(cwd, ['rev-parse', '--is-inside-work-tree']);
+    return true;
+  } catch { return false; }
+}
+
+// Git status — full repository state
+app.get('/api/projects/:id/git/status', async (req, res) => {
+  const project = projects.find(p => p.id === req.params.id);
+  if (!project) return res.status(404).json({ error: 'not found' });
+
+  try {
+    if (!(await isGitRepo(project.path))) {
+      return res.json({ isGitRepo: false });
+    }
+
+    // Run git commands in parallel
+    const [branchResult, statusResult, diffResult, diffCachedResult, aheadBehind] = await Promise.allSettled([
+      gitExec(project.path, ['branch', '--show-current']),
+      gitExec(project.path, ['status', '--porcelain']),
+      gitExec(project.path, ['diff']),
+      gitExec(project.path, ['diff', '--cached']),
+      gitExec(project.path, ['rev-list', '--left-right', '--count', 'HEAD...@{upstream}']).catch(() => ({ stdout: '', stderr: '' })),
+    ]);
+
+    const branch = branchResult.status === 'fulfilled' ? branchResult.value.stdout.trim() : 'unknown';
+    const statusLines = statusResult.status === 'fulfilled' ? statusResult.value.stdout.trim().split('\n').filter(Boolean) : [];
+    const diff = diffResult.status === 'fulfilled' ? diffResult.value.stdout : '';
+    const diffCached = diffCachedResult.status === 'fulfilled' ? diffCachedResult.value.stdout : '';
+
+    let ahead = 0, behind = 0;
+    if (aheadBehind.status === 'fulfilled') {
+      const val = (aheadBehind.value as any);
+      const stdout = typeof val === 'object' && val.stdout ? val.stdout : '';
+      const parts = stdout.trim().split(/\s+/);
+      if (parts.length === 2) {
+        ahead = parseInt(parts[0]) || 0;
+        behind = parseInt(parts[1]) || 0;
+      }
+    }
+
+    // Parse porcelain status
+    const staged: { path: string; status: string }[] = [];
+    const unstaged: { path: string; status: string }[] = [];
+    const untracked: string[] = [];
+
+    for (const line of statusLines) {
+      const x = line[0]; // index (staged) status
+      const y = line[1]; // worktree (unstaged) status
+      const filePath = line.slice(3).trim().replace(/^"(.*)"$/, '$1');
+
+      if (x === '?' && y === '?') {
+        untracked.push(filePath);
+      } else {
+        if (x && x !== ' ' && x !== '?') {
+          staged.push({ path: filePath, status: x });
+        }
+        if (y && y !== ' ' && y !== '?') {
+          unstaged.push({ path: filePath, status: y });
+        }
+      }
+    }
+
+    res.json({
+      isGitRepo: true,
+      branch,
+      ahead,
+      behind,
+      staged,
+      unstaged,
+      untracked,
+      diff,
+      diffCached,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message ?? 'git status failed' });
+  }
+});
+
+// Git diff — for a specific file or all
+app.get('/api/projects/:id/git/diff', async (req, res) => {
+  const project = projects.find(p => p.id === req.params.id);
+  if (!project) return res.status(404).json({ error: 'not found' });
+
+  try {
+    const file = req.query.file as string | undefined;
+    const staged = req.query.staged === 'true';
+
+    const args = ['diff'];
+    if (staged) args.push('--cached');
+    if (file) args.push('--', file);
+
+    const result = await gitExec(project.path, args, 2 * 1024 * 1024);
+
+    // Also get stat summary
+    const statArgs = ['diff', '--stat'];
+    if (staged) statArgs.push('--cached');
+    if (file) statArgs.push('--', file);
+    const statResult = await gitExec(project.path, statArgs);
+
+    // Parse numstat for per-file additions/deletions
+    const numstatArgs = ['diff', '--numstat'];
+    if (staged) numstatArgs.push('--cached');
+    if (file) numstatArgs.push('--', file);
+    const numstatResult = await gitExec(project.path, numstatArgs);
+
+    const files = numstatResult.stdout.trim().split('\n').filter(Boolean).map(line => {
+      const parts = line.split('\t');
+      return {
+        additions: parseInt(parts[0]) || 0,
+        deletions: parseInt(parts[1]) || 0,
+        path: parts[2] || '',
+      };
+    });
+
+    res.json({ diff: result.stdout, stat: statResult.stdout.trim(), files });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message ?? 'git diff failed' });
+  }
+});
+
+// Git action — add, commit, push, pull, discard
+app.post('/api/projects/:id/git/action', async (req, res) => {
+  const project = projects.find(p => p.id === req.params.id);
+  if (!project) return res.status(404).json({ error: 'not found' });
+
+  try {
+    const { action, files: actionFiles, message } = req.body;
+
+    let result: { stdout: string; stderr: string };
+
+    switch (action) {
+      case 'add':
+        if (!actionFiles || !Array.isArray(actionFiles) || actionFiles.length === 0) {
+          return res.status(400).json({ error: 'files required for add' });
+        }
+        result = await gitExec(project.path, ['add', ...actionFiles]);
+        break;
+
+      case 'add_all':
+        result = await gitExec(project.path, ['add', '-A']);
+        break;
+
+      case 'commit':
+        if (!message || typeof message !== 'string') {
+          return res.status(400).json({ error: 'message required for commit' });
+        }
+        result = await gitExec(project.path, ['commit', '-m', message]);
+        break;
+
+      case 'push':
+        result = await gitExec(project.path, ['push'], 5 * 1024 * 1024);
+        break;
+
+      case 'pull':
+        result = await gitExec(project.path, ['pull'], 5 * 1024 * 1024);
+        break;
+
+      case 'discard':
+        if (!actionFiles || !Array.isArray(actionFiles) || actionFiles.length === 0) {
+          return res.status(400).json({ error: 'files required for discard' });
+        }
+        result = await gitExec(project.path, ['checkout', '--', ...actionFiles]);
+        break;
+
+      default:
+        return res.status(400).json({ error: `unknown action: ${action}` });
+    }
+
+    res.json({ ok: true, output: (result.stdout + '\n' + result.stderr).trim() });
+  } catch (err: any) {
+    // Git commands return non-zero exit codes for things like "nothing to commit"
+    // Include both stdout and stderr in the error response
+    const output = ((err.stdout ?? '') + '\n' + (err.stderr ?? '')).trim();
+    res.status(422).json({ ok: false, error: err.message ?? 'git action failed', output });
+  }
+});
+
+// ── Search API ─────────────────────────────────────────────────
+// Full-text search across job names, prompts, and log content
+app.get('/api/search', (req, res) => {
+  const q = (req.query.q as string ?? '').trim().toLowerCase();
+  if (!q) return res.json([]);
+
+  const limit = Math.min(Number(req.query.limit) || 50, 200);
+  const searchLogs = req.query.logs !== 'false'; // search in log content by default
+
+  interface SearchResult {
+    jobId: string;
+    projectId: string;
+    jobName?: string;
+    prompt: string;
+    status: string;
+    mode?: string;
+    createdAt: string;
+    updatedAt: string;
+    costUsd?: number;
+    matchField: 'name' | 'prompt' | 'log';
+    matchPreview?: string;
+    score: number;
+  }
+
+  const results: SearchResult[] = [];
+  const seen = new Set<string>();
+
+  // Fuzzy score: returns score > 0 if all query chars found in order, 0 if no match.
+  // Bonuses: consecutive matches, word-start matches, exact substring match.
+  function fuzzyScore(text: string, query: string): number {
+    const t = text.toLowerCase();
+    const qLen = query.length;
+    if (!qLen) return 0;
+
+    // Exact substring bonus
+    const substringIdx = t.indexOf(query);
+    if (substringIdx !== -1) {
+      // High base score + bonus for early match
+      return 1000 + (100 - Math.min(substringIdx, 99));
+    }
+
+    let ti = 0, qi = 0, score = 0, consecutive = 0;
+    while (ti < t.length && qi < qLen) {
+      if (t[ti] === query[qi]) {
+        score += 10 + consecutive * 5;
+        // Word-start bonus
+        if (ti === 0 || /[\s\-_./]/.test(text[ti - 1])) score += 15;
+        consecutive++;
+        qi++;
+      } else {
+        consecutive = 0;
+      }
+      ti++;
+    }
+    return qi === qLen ? score : 0;
+  }
+
+  for (const job of jobs) {
+    if (job.status === 'archived') continue;
+
+    let bestScore = 0;
+    let matchField: 'name' | 'prompt' | 'log' = 'prompt';
+    let matchPreview: string | undefined;
+
+    // Score on job name (highest priority)
+    if (job.name) {
+      const s = fuzzyScore(job.name, q);
+      if (s > bestScore) { bestScore = s + 500; matchField = 'name'; } // name bonus
+    }
+
+    // Score on prompt
+    const promptScore = fuzzyScore(job.prompt, q);
+    if (promptScore > bestScore) { bestScore = promptScore + 200; matchField = 'prompt'; }
+
+    // Score on log content (search through logs)
+    if (searchLogs && bestScore < 500) { // only search logs if no strong match on name/prompt
+      for (const log of job.logs) {
+        if (log.type === 'tool_result') continue; // skip large tool results for performance
+        const logLower = log.content.toLowerCase();
+        const idx = logLower.indexOf(q);
+        if (idx !== -1) {
+          const logScore = 100; // flat score for log matches
+          if (logScore > bestScore || (logScore >= bestScore && matchField !== 'name' && matchField !== 'prompt')) {
+            bestScore = logScore;
+            matchField = 'log';
+            // Extract preview around the match
+            const start = Math.max(0, idx - 40);
+            const end = Math.min(log.content.length, idx + q.length + 60);
+            matchPreview = (start > 0 ? '...' : '') + log.content.slice(start, end) + (end < log.content.length ? '...' : '');
+          }
+          break; // one log match is enough
+        }
+      }
+    }
+
+    if (bestScore > 0) {
+      results.push({
+        jobId: job.id,
+        projectId: job.projectId,
+        jobName: job.name,
+        prompt: job.prompt,
+        status: job.status,
+        mode: job.mode,
+        createdAt: job.createdAt,
+        updatedAt: job.updatedAt,
+        costUsd: job.costUsd,
+        matchField,
+        matchPreview,
+        score: bestScore,
+      });
+      seen.add(job.id);
+    }
+  }
+
+  // Sort by score descending, then by updatedAt descending
+  results.sort((a, b) => b.score - a.score || new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+
+  res.json(results.slice(0, limit));
 });
 
 // ── Memories API (full Claude Code memory hierarchy) ───────────

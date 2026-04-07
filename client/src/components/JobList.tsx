@@ -1,12 +1,14 @@
 import { useState, useRef, useEffect } from 'react';
 import type { Job } from '../types';
-import { Clock, DollarSign } from 'lucide-react';
+import { Clock, DollarSign, Archive } from 'lucide-react';
 
 interface Props {
   jobs: Job[];
   selectedJobId: string | null;
   onSelect: (id: string) => void;
   onRename: (id: string, name: string) => void;
+  archivedCount?: number;
+  onShowArchived?: () => void;
 }
 
 function timeAgo(iso: string) {
@@ -17,7 +19,7 @@ function timeAgo(iso: string) {
   return `${Math.floor(s / 86400)}d ago`;
 }
 
-export function JobList({ jobs, selectedJobId, onSelect, onRename }: Props) {
+export function JobList({ jobs, selectedJobId, onSelect, onRename, archivedCount = 0, onShowArchived }: Props) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
@@ -53,60 +55,69 @@ export function JobList({ jobs, selectedJobId, onSelect, onRename }: Props) {
   }
 
   return (
-    <div style={{ overflow: 'auto', flex: 1, padding: '8px' }}>
-      {jobs.map(j => (
-        <div
-          key={j.id}
-          className={`job-card ${selectedJobId === j.id ? 'active' : ''}`}
-          onClick={() => onSelect(j.id)}
-        >
-          <div className="job-card-header">
-            <span className={`badge badge-${j.status}`} style={{ fontSize: 10, padding: '1px 6px', flexShrink: 0 }}>
-              {j.status === 'running' ? <span className="running-indicator">{j.status}</span>
-                : j.status === 'idle' ? <span className="running-indicator">idle</span>
-                : j.status}
-            </span>
-            {j.mode === 'session' && (
-              <span style={{ fontSize: 9, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', flexShrink: 0 }}>S</span>
-            )}
-            {editingId === j.id ? (
-              <input
-                ref={inputRef}
-                className="job-card-title-input"
-                value={editValue}
-                onChange={e => setEditValue(e.target.value)}
-                onBlur={commitRename}
-                onKeyDown={e => {
-                  if (e.key === 'Enter') commitRename();
-                  if (e.key === 'Escape') cancelRename();
-                }}
-                onClick={e => e.stopPropagation()}
-              />
-            ) : (
-              <span
-                className="job-card-title"
-                onDoubleClick={e => handleDoubleClick(j, e)}
-                title={j.prompt}
-              >
-                {j.name || j.prompt}
+    <div style={{ overflow: 'auto', flex: 1, padding: '8px', display: 'flex', flexDirection: 'column' }}>
+      <div style={{ flex: 1 }}>
+        {jobs.map(j => (
+          <div
+            key={j.id}
+            className={`job-card ${selectedJobId === j.id ? 'active' : ''}`}
+            onClick={() => onSelect(j.id)}
+          >
+            <div className="job-card-header">
+              <span className={`badge badge-${j.status}`} style={{ fontSize: 10, padding: '1px 6px', flexShrink: 0 }}>
+                {j.status === 'running' ? <span className="running-indicator">{j.status}</span>
+                  : j.status === 'idle' ? <span className="running-indicator">idle</span>
+                  : j.status}
               </span>
-            )}
-            <div className="meta" style={{ marginTop: 0, flexShrink: 0 }}>
-              <span className="flex items-center gap-2">
-                <Clock size={9} /> {timeAgo(j.createdAt)}
-              </span>
-              {j.costUsd != null && (
-                <span className="flex items-center gap-2">
-                  <DollarSign size={9} /> ${j.costUsd.toFixed(2)}
+              {j.mode === 'session' && (
+                <span style={{ fontSize: 9, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', flexShrink: 0 }}>S</span>
+              )}
+              {editingId === j.id ? (
+                <input
+                  ref={inputRef}
+                  className="job-card-title-input"
+                  value={editValue}
+                  onChange={e => setEditValue(e.target.value)}
+                  onBlur={commitRename}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') commitRename();
+                    if (e.key === 'Escape') cancelRename();
+                  }}
+                  onClick={e => e.stopPropagation()}
+                />
+              ) : (
+                <span
+                  className="job-card-title"
+                  onDoubleClick={e => handleDoubleClick(j, e)}
+                  title={j.prompt}
+                >
+                  {j.name || j.prompt}
                 </span>
               )}
+              <div className="meta" style={{ marginTop: 0, flexShrink: 0 }}>
+                <span className="flex items-center gap-2">
+                  <Clock size={9} /> {timeAgo(j.createdAt)}
+                </span>
+                {j.costUsd != null && (
+                  <span className="flex items-center gap-2">
+                    <DollarSign size={9} /> ${j.costUsd.toFixed(2)}
+                  </span>
+                )}
+              </div>
             </div>
+            {j.name && (
+              <div className="prompt">{j.prompt}</div>
+            )}
           </div>
-          {j.name && (
-            <div className="prompt">{j.prompt}</div>
-          )}
+        ))}
+      </div>
+      {archivedCount > 0 && onShowArchived && (
+        <div className="archived-jobs-entry" onClick={onShowArchived}>
+          <Archive size={14} />
+          <span>Archived Jobs</span>
+          <span className="archived-count">{archivedCount}</span>
         </div>
-      ))}
+      )}
     </div>
   );
 }

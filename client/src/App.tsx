@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useStore } from './hooks/useStore';
+import { useResizable } from './hooks/useResizable';
 import { api } from './hooks/api';
 import { Sidebar } from './components/Sidebar';
 import { JobList } from './components/JobList';
@@ -8,7 +9,8 @@ import { ApprovalList } from './components/ApprovalList';
 import { ApprovalDetail } from './components/ApprovalDetail';
 import { NewJobModal } from './components/NewJobModal';
 import { NewProjectModal } from './components/NewProjectModal';
-import { Terminal as TerminalIcon, Plus, ClipboardCheck } from 'lucide-react';
+import { CommandPalette } from './components/CommandPalette';
+import { Terminal as TerminalIcon, Plus, ClipboardCheck, Search, Archive, ArchiveRestore } from 'lucide-react';
 
 export default function App() {
   const store = useStore();
@@ -18,11 +20,42 @@ export default function App() {
   const [selectedApprovalId, setSelectedApprovalId] = useState<string | null>(null);
   const [showNewJob, setShowNewJob] = useState(false);
   const [showNewProject, setShowNewProject] = useState(false);
+  const [showCommandPalette, setShowCommandPalette] = useState(false);
+  const [showArchived, setShowArchived] = useState(false);
+
+  // Resizable panels
+  const sidebarResize = useResizable({
+    initialWidth: 280,
+    minWidth: 200,
+    maxWidth: 480,
+    storageKey: 'claude-sidebar-width',
+  });
+  const splitLeftResize = useResizable({
+    initialWidth: 340,
+    minWidth: 240,
+    maxWidth: 600,
+    storageKey: 'claude-split-left-width',
+  });
+
+  // Cmd+K / Ctrl+K hotkey for command palette
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        e.preventDefault();
+        setShowCommandPalette(prev => !prev);
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, []);
 
   const selectedProject = store.projects.find(p => p.id === selectedProjectId);
   const projectJobs = store.jobs
     .filter(j => j.projectId === selectedProjectId && j.status !== 'archived')
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  const archivedJobs = store.jobs
+    .filter(j => j.projectId === selectedProjectId && j.status === 'archived')
+    .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
   const selectedJob = store.jobs.find(j => j.id === selectedJobId);
   const selectedJobLogs = selectedJobId ? (store.jobLogs[selectedJobId] ?? []) : [];
   const selectedApproval = store.approvals.find(a => a.id === selectedApprovalId);
@@ -40,6 +73,7 @@ export default function App() {
     setSelectedProjectId(id);
     setSelectedJobId(null);
     setSelectedApprovalId(null);
+    setShowArchived(false);
   };
 
   const handleSelectJob = (projectId: string, jobId: string) => {
@@ -64,10 +98,19 @@ export default function App() {
     setSelectedProjectId(projectId);
     setSelectedJobId(jobId);
     setSelectedApprovalId(null);
+    setShowArchived(false);
+  };
+
+  const handleUnarchive = async (jobId: string) => {
+    try {
+      await api.unarchiveJob(jobId);
+    } catch (err) {
+      console.error('Failed to unarchive job:', err);
+    }
   };
 
   return (
-    <div className="app">
+    <div className={`app${sidebarResize.isDragging || splitLeftResize.isDragging ? ' resizing' : ''}`}>
       <Sidebar
         projects={store.projects}
         jobs={store.jobs}
@@ -83,6 +126,12 @@ export default function App() {
         onSelectApproval={handleSelectApproval}
         onSelectApprovalView={handleSelectApprovalView}
         onNewProject={() => setShowNewProject(true)}
+        onOpenSearch={() => setShowCommandPalette(true)}
+        style={{ width: sidebarResize.width, minWidth: sidebarResize.width }}
+      />
+      <div
+        className={`resize-handle resize-handle-sidebar${sidebarResize.isDragging ? ' active' : ''}`}
+        onMouseDown={sidebarResize.handleMouseDown}
       />
 
       <div className="main">
@@ -101,7 +150,7 @@ export default function App() {
               </div>
             </div>
             <div className="split">
-              <div className="split-left">
+              <div className="split-left" style={{ width: splitLeftResize.width, minWidth: splitLeftResize.width }}>
                 <ApprovalList
                   approvals={store.approvals}
                   projects={store.projects}
@@ -110,6 +159,10 @@ export default function App() {
                   onSelect={setSelectedApprovalId}
                 />
               </div>
+              <div
+                className={`resize-handle resize-handle-split${splitLeftResize.isDragging ? ' active' : ''}`}
+                onMouseDown={splitLeftResize.handleMouseDown}
+              />
               <div className="split-right">
                 {selectedApproval ? (
                   <ApprovalDetail
@@ -132,30 +185,100 @@ export default function App() {
           <>
             <div className="topbar">
               <div className="flex items-center gap-3">
-                <TerminalIcon size={16} style={{ color: 'var(--accent)' }} />
-                <h2>{selectedProject.name}</h2>
-                <span className="text-sm text-muted font-mono">{selectedProject.path}</span>
+                {showArchived ? (
+                  <>
+                    <Archive size={16} style={{ color: 'var(--text-muted)' }} />
+                    <h2>Archived Jobs</h2>
+                    <span className="text-sm text-muted">({archivedJobs.length})</span>
+                  </>
+                ) : (
+                  <>
+                    <TerminalIcon size={16} style={{ color: 'var(--accent)' }} />
+                    <h2>{selectedProject.name}</h2>
+                    <span className="text-sm text-muted font-mono">{selectedProject.path}</span>
+                  </>
+                )}
               </div>
-              <button className="btn btn-primary" onClick={() => setShowNewJob(true)}>
-                <Plus size={14} /> New Job
-              </button>
+              <div className="flex gap-2">
+                {showArchived && (
+                  <button className="btn btn-sm" onClick={() => { setShowArchived(false); setSelectedJobId(null); }}>
+                    ← Back to Jobs
+                  </button>
+                )}
+                {!showArchived && (
+                  <button className="btn btn-primary" onClick={() => setShowNewJob(true)}>
+                    <Plus size={14} /> New Job
+                  </button>
+                )}
+              </div>
             </div>
             <div className="split">
-              <div className="split-left">
-                <JobList
-                  jobs={projectJobs}
-                  selectedJobId={selectedJobId}
-                  onSelect={setSelectedJobId}
-                  onRename={handleRename}
-                />
+              <div className="split-left" style={{ width: splitLeftResize.width, minWidth: splitLeftResize.width }}>
+                {showArchived ? (
+                  <div className="archived-job-list" style={{ overflow: 'auto', flex: 1, padding: '8px' }}>
+                    {archivedJobs.length === 0 ? (
+                      <div className="empty-state" style={{ padding: '40px 16px' }}>
+                        <Archive size={32} style={{ opacity: 0.3, marginBottom: 8 }} />
+                        <p>No archived jobs in this project.</p>
+                      </div>
+                    ) : (
+                      archivedJobs.map(j => (
+                        <div
+                          key={j.id}
+                          className={`job-card archived-job-card ${selectedJobId === j.id ? 'active' : ''}`}
+                          onClick={() => setSelectedJobId(j.id)}
+                        >
+                          <div className="job-card-header">
+                            <span className="badge badge-archived" style={{ fontSize: 10, padding: '1px 6px', flexShrink: 0 }}>
+                              archived
+                            </span>
+                            <span className="job-card-title" title={j.prompt}>
+                              {j.name || j.prompt}
+                            </span>
+                            <button
+                              className="btn btn-sm archived-restore-btn"
+                              onClick={e => { e.stopPropagation(); handleUnarchive(j.id); }}
+                              title="Restore from archive"
+                            >
+                              <ArchiveRestore size={12} />
+                            </button>
+                          </div>
+                          {j.name && <div className="prompt">{j.prompt}</div>}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                ) : (
+                  <JobList
+                    jobs={projectJobs}
+                    selectedJobId={selectedJobId}
+                    onSelect={setSelectedJobId}
+                    onRename={handleRename}
+                    archivedCount={archivedJobs.length}
+                    onShowArchived={() => { setShowArchived(true); setSelectedJobId(null); }}
+                  />
+                )}
               </div>
+              <div
+                className={`resize-handle resize-handle-split${splitLeftResize.isDragging ? ' active' : ''}`}
+                onMouseDown={splitLeftResize.handleMouseDown}
+              />
               <div className="split-right">
                 {selectedJob ? (
-                  <JobDetail job={selectedJob} logs={selectedJobLogs} projectId={selectedProjectId!} />
+                  <JobDetail job={selectedJob} logs={selectedJobLogs} projectId={selectedProjectId!} onNewJob={() => setShowNewJob(true)} />
                 ) : (
                   <div className="empty-state">
-                    <TerminalIcon size={48} />
-                    <p>Select a job to view its output, or create a new one</p>
+                    {showArchived ? (
+                      <>
+                        <Archive size={48} />
+                        <p>Select an archived job to view, or restore it</p>
+                      </>
+                    ) : (
+                      <>
+                        <TerminalIcon size={48} />
+                        <p>Select a job to view its output, or create a new one</p>
+                      </>
+                    )}
                   </div>
                 )}
               </div>
@@ -186,6 +309,19 @@ export default function App() {
           projectId={selectedProjectId}
           onClose={() => setShowNewJob(false)}
           onCreated={(j) => { setSelectedJobId(j.id); setShowNewJob(false); }}
+        />
+      )}
+
+      {showCommandPalette && (
+        <CommandPalette
+          jobs={store.jobs}
+          projects={store.projects}
+          jobLogs={store.jobLogs}
+          onSelectJob={(projectId, jobId) => {
+            handleSelectJob(projectId, jobId);
+            setShowCommandPalette(false);
+          }}
+          onClose={() => setShowCommandPalette(false)}
         />
       )}
     </div>

@@ -1,13 +1,16 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { api } from '../hooks/api';
+import { useSuggestions, type CommandDef } from '../hooks/useSuggestions';
+import { SuggestionDropdown } from './SuggestionDropdown';
 import type { Job, LogEntry } from '../types';
-import { Square, Archive, Play, FolderTree, ScrollText, MessageSquare, ChevronDown, ChevronRight, Wrench, Terminal, FileText, Search, Edit3, PenTool, Globe, Bot, FileCode, Copy, BookOpen, Clock, Save, X } from 'lucide-react';
+import { Square, Archive, Play, FolderTree, ScrollText, MessageSquare, ChevronDown, ChevronRight, Wrench, Terminal, FileText, Search, Edit3, PenTool, Globe, Bot, FileCode, Copy, BookOpen, Clock, Save, X, Folder, FolderOpen, File, RefreshCw, GitBranch, Plus, Upload, Download, Check, Undo2, Star } from 'lucide-react';
 import { renderInline, isTableRow, isTableSeparator, renderTable, renderMarkdown } from './Markdown';
 
 interface Props {
   job: Job;
   logs: LogEntry[];
   projectId: string;
+  onNewJob?: () => void;
 }
 
 function formatTime(iso: string) {
@@ -650,20 +653,85 @@ function CollapsibleUserText({ text }: { text: string }) {
 }
 
 // ── Main component ─────────────────────────────────────────────
-export function JobDetail({ job, logs, projectId }: Props) {
-  const [tab, setTab] = useState<'chat' | 'output' | 'files' | 'memories' | 'cron'>('chat');
+export function JobDetail({ job, logs, projectId, onNewJob }: Props) {
+  const [tab, setTab] = useState<'chat' | 'output' | 'files' | 'git' | 'memories' | 'cron'>('chat');
   const [fullLogs, setFullLogs] = useState<LogEntry[]>([]);
   const [files, setFiles] = useState<any[]>([]);
   const [fileContent, setFileContent] = useState<{ path: string; content: string } | null>(null);
+  const [fileSearchQuery, setFileSearchQuery] = useState('');
+  const [fileSearchResults, setFileSearchResults] = useState<{ files: any[]; contentMatches: any[] } | null>(null);
+  const [fileSearching, setFileSearching] = useState(false);
+  const fileSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [followUp, setFollowUp] = useState('');
   const [memorySections, setMemorySections] = useState<any[] | null>(null);
   const [editingMemory, setEditingMemory] = useState<{ filePath: string; content: string } | null>(null);
   const [memorySaving, setMemorySaving] = useState(false);
   const [cronTasks, setCronTasks] = useState<any[]>([]);
   const [cronPath, setCronPath] = useState('');
+  const [gitStatus, setGitStatus] = useState<any>(null);
+  const [gitSelectedFile, setGitSelectedFile] = useState<string | null>(null);
+  const [gitFileDiff, setGitFileDiff] = useState<string>('');
+  const [gitCommitMsg, setGitCommitMsg] = useState('');
+  const [gitLoading, setGitLoading] = useState(false);
+  const [gitActionOutput, setGitActionOutput] = useState<{ ok: boolean; text: string } | null>(null);
+  const [gitShowStaged, setGitShowStaged] = useState(false);
   const [promptExpanded, setPromptExpanded] = useState(false);
   const termRef = useRef<HTMLDivElement>(null);
   const chatRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // Commands for / suggestions — contextual to current job state
+  const suggestionCommands = useMemo<CommandDef[]>(() => {
+    const cmds: CommandDef[] = [
+      {
+        id: 'stop',
+        label: '/stop',
+        description: 'Stop the running job',
+        available: () => job.status === 'running' || job.status === 'idle',
+        execute: () => api.stopJob(job.id).catch(console.error),
+      },
+      {
+        id: 'archive',
+        label: '/archive',
+        description: 'Archive this job',
+        available: () => job.status === 'completed' || job.status === 'failed',
+        execute: () => api.archiveJob(job.id).catch(console.error),
+      },
+      {
+        id: 'clear',
+        label: '/clear',
+        description: 'Clear the chat display',
+        available: () => true,
+        execute: () => setFullLogs([]),
+      },
+      {
+        id: 'files',
+        label: '/files',
+        description: 'Switch to files tab',
+        available: () => true,
+        execute: () => setTab('files'),
+      },
+    ];
+    if (onNewJob) {
+      cmds.push({
+        id: 'new',
+        label: '/new',
+        description: 'Create a new job',
+        available: () => true,
+        execute: () => onNewJob(),
+      });
+    }
+    return cmds;
+  }, [job.id, job.status, onNewJob]);
+
+  const suggestions = useSuggestions({
+    inputRef,
+    value: followUp,
+    setValue: setFollowUp,
+    projectId,
+    commands: suggestionCommands,
+    enabled: true,
+  });
 
   useEffect(() => {
     setFullLogs([]);
@@ -688,6 +756,21 @@ export function JobDetail({ job, logs, projectId }: Props) {
     [allLogs, job.status],
   );
 
+  // Extract files touched by this job from its tool call logs
+  const jobTouchedFiles = useMemo(() => {
+    const files = new Set<string>();
+    for (const log of allLogs) {
+      if (log.type !== 'tool') continue;
+      const input = log.meta?.input as Record<string, unknown> | undefined;
+      if (!input) continue;
+      const name = log.content.replace(/^🔧\s*/, '');
+      if ((name === 'Write' || name === 'Edit' || name === 'Read') && typeof input.file_path === 'string') {
+        files.add(input.file_path as string);
+      }
+    }
+    return files;
+  }, [allLogs]);
+
   // Auto-scroll
   useEffect(() => {
     const el = tab === 'chat' ? chatRef.current : termRef.current;
@@ -697,6 +780,8 @@ export function JobDetail({ job, logs, projectId }: Props) {
   useEffect(() => {
     if (tab === 'files') {
       api.getFiles(projectId).then(setFiles).catch(() => setFiles([]));
+    } else if (tab === 'git') {
+      refreshGitStatus();
     } else if (tab === 'memories') {
       setEditingMemory(null);
       api.getMemories(projectId).then((d: any) => setMemorySections(d.sections ?? [])).catch(() => setMemorySections([]));
@@ -724,7 +809,7 @@ export function JobDetail({ job, logs, projectId }: Props) {
   const handleArchive = () => api.archiveJob(job.id).catch(console.error);
   const handleCloseSession = () => api.closeSession(job.id).catch(console.error);
   const handleSend = () => {
-    if (!followUp.trim()) return;
+    if (!followUp.trim() || suggestions.isOpen) return;
     const isSession = job.mode === 'session';
     const isIdle = job.status === 'idle';
     if (isSession && isIdle) {
@@ -736,6 +821,75 @@ export function JobDetail({ job, logs, projectId }: Props) {
 
   const loadFile = (filePath: string) => {
     api.getFile(projectId, filePath).then(setFileContent).catch(() => setFileContent(null));
+  };
+
+  const handleFileSearch = useCallback((query: string) => {
+    setFileSearchQuery(query);
+    if (fileSearchTimer.current) clearTimeout(fileSearchTimer.current);
+    if (!query.trim()) {
+      setFileSearchResults(null);
+      setFileSearching(false);
+      return;
+    }
+    setFileSearching(true);
+    fileSearchTimer.current = setTimeout(() => {
+      api.searchFiles(projectId, query)
+        .then((results: any) => {
+          setFileSearchResults(results);
+          setFileSearching(false);
+        })
+        .catch(() => {
+          setFileSearchResults({ files: [], contentMatches: [] });
+          setFileSearching(false);
+        });
+    }, 300); // debounce 300ms
+  }, [projectId]);
+
+  const refreshFiles = () => {
+    api.getFiles(projectId).then(setFiles).catch(() => setFiles([]));
+  };
+
+  // ── Git helpers ──
+  const refreshGitStatus = () => {
+    setGitLoading(true);
+    setGitActionOutput(null);
+    api.getGitStatus(projectId).then((data: any) => {
+      setGitStatus(data);
+      setGitLoading(false);
+      // If a file was selected, refresh its diff
+      if (gitSelectedFile) {
+        loadGitFileDiff(gitSelectedFile, gitShowStaged);
+      }
+    }).catch(() => { setGitStatus(null); setGitLoading(false); });
+  };
+
+  const loadGitFileDiff = (filePath: string, staged: boolean) => {
+    setGitSelectedFile(filePath);
+    api.getGitDiff(projectId, filePath, staged).then((data: any) => {
+      setGitFileDiff(data.diff || '(no changes)');
+    }).catch(() => setGitFileDiff('(error loading diff)'));
+  };
+
+  const handleGitAction = async (action: string, payload?: { files?: string[]; message?: string }) => {
+    setGitLoading(true);
+    setGitActionOutput(null);
+    try {
+      const result = await api.gitAction(projectId, action, payload);
+      setGitActionOutput({ ok: true, text: result.output || 'Done' });
+      // Refresh status after action
+      refreshGitStatus();
+    } catch (err: any) {
+      setGitActionOutput({ ok: false, text: err.message ?? 'Action failed' });
+      setGitLoading(false);
+    }
+  };
+
+  // Check if a git-relative file path was touched by this job
+  const isJobTouchedFile = (relPath: string): boolean => {
+    for (const absPath of jobTouchedFiles) {
+      if (absPath.endsWith('/' + relPath) || absPath === relPath) return true;
+    }
+    return false;
   };
 
   const isRunning = job.status === 'running';
@@ -818,6 +972,9 @@ export function JobDetail({ job, logs, projectId }: Props) {
         <div className={`tab ${tab === 'files' ? 'active' : ''}`} onClick={() => setTab('files')}>
           <span className="flex items-center gap-2"><FolderTree size={12} /> Files</span>
         </div>
+        <div className={`tab ${tab === 'git' ? 'active' : ''}`} onClick={() => setTab('git')}>
+          <span className="flex items-center gap-2"><GitBranch size={12} /> Git</span>
+        </div>
         <div className={`tab ${tab === 'memories' ? 'active' : ''}`} onClick={() => setTab('memories')}>
           <span className="flex items-center gap-2"><BookOpen size={12} /> Memories</span>
         </div>
@@ -883,13 +1040,30 @@ export function JobDetail({ job, logs, projectId }: Props) {
 
             {showInput && (
               <div className="chat-input-bar">
-                <input
-                  className="input flex-1"
-                  placeholder={canSendMessage ? 'Send message to session...' : 'Send follow-up prompt...'}
-                  value={followUp}
-                  onChange={e => setFollowUp(e.target.value)}
-                  onKeyDown={e => e.key === 'Enter' && handleSend()}
-                />
+                <div className="suggestion-wrapper">
+                  <input
+                    ref={tab === 'chat' ? inputRef : undefined}
+                    className="input flex-1"
+                    placeholder={canSendMessage ? 'Type @ for files, / for commands...' : 'Send follow-up prompt... (@ files, / commands)'}
+                    value={followUp}
+                    onChange={suggestions.handleChange}
+                    onKeyDown={e => {
+                      suggestions.handleKeyDown(e);
+                      if (!e.defaultPrevented && e.key === 'Enter') handleSend();
+                    }}
+                  />
+                  {suggestions.isOpen && tab === 'chat' && (
+                    <SuggestionDropdown
+                      items={suggestions.items}
+                      selectedIndex={suggestions.selectedIndex}
+                      onSelect={suggestions.selectItem}
+                      onHover={suggestions.setSelectedIndex}
+                      position="above"
+                      loading={suggestions.loading}
+                      triggerType={suggestions.triggerType}
+                    />
+                  )}
+                </div>
                 <button className="btn btn-primary" onClick={handleSend} disabled={!followUp.trim()}>
                   <Play size={12} /> {canSendMessage ? 'Send' : 'Continue'}
                 </button>
@@ -914,13 +1088,30 @@ export function JobDetail({ job, logs, projectId }: Props) {
 
             {showInput && (
               <div className="chat-input-bar">
-                <input
-                  className="input flex-1"
-                  placeholder={canSendMessage ? 'Send message to session...' : 'Send follow-up prompt to continue session...'}
-                  value={followUp}
-                  onChange={e => setFollowUp(e.target.value)}
-                  onKeyDown={e => e.key === 'Enter' && handleSend()}
-                />
+                <div className="suggestion-wrapper">
+                  <input
+                    ref={tab === 'output' ? inputRef : undefined}
+                    className="input flex-1"
+                    placeholder={canSendMessage ? 'Type @ for files, / for commands...' : 'Send follow-up prompt... (@ files, / commands)'}
+                    value={followUp}
+                    onChange={suggestions.handleChange}
+                    onKeyDown={e => {
+                      suggestions.handleKeyDown(e);
+                      if (!e.defaultPrevented && e.key === 'Enter') handleSend();
+                    }}
+                  />
+                  {suggestions.isOpen && tab === 'output' && (
+                    <SuggestionDropdown
+                      items={suggestions.items}
+                      selectedIndex={suggestions.selectedIndex}
+                      onSelect={suggestions.selectItem}
+                      onHover={suggestions.setSelectedIndex}
+                      position="above"
+                      loading={suggestions.loading}
+                      triggerType={suggestions.triggerType}
+                    />
+                  )}
+                </div>
                 <button className="btn btn-primary" onClick={handleSend} disabled={!followUp.trim()}>
                   <Play size={12} /> {canSendMessage ? 'Send' : 'Continue'}
                 </button>
@@ -931,24 +1122,351 @@ export function JobDetail({ job, logs, projectId }: Props) {
 
         {/* ── Files tab ── */}
         {tab === 'files' && (
-          <div className="flex gap-4" style={{ height: '100%' }}>
-            <div style={{ width: 240, overflow: 'auto' }}>
-              <FileTree nodes={files} onSelect={loadFile} />
+          <div className="file-explorer" style={{ height: '100%' }}>
+            {/* Left panel: search + tree */}
+            <div className="file-explorer-sidebar">
+              <div className="file-explorer-toolbar">
+                <div className="file-search-box">
+                  <Search size={13} className="file-search-icon" />
+                  <input
+                    className="file-search-input"
+                    placeholder="Search files & content..."
+                    value={fileSearchQuery}
+                    onChange={e => handleFileSearch(e.target.value)}
+                  />
+                  {fileSearchQuery && (
+                    <X size={13} className="file-search-clear" onClick={() => handleFileSearch('')} />
+                  )}
+                </div>
+                <button className="file-refresh-btn" onClick={refreshFiles} title="Refresh file tree">
+                  <RefreshCw size={13} />
+                </button>
+              </div>
+
+              <div className="file-explorer-tree">
+                {fileSearchQuery.trim() ? (
+                  // Search results view
+                  <div className="file-search-results">
+                    {fileSearching && <div className="file-search-status">Searching...</div>}
+                    {fileSearchResults && !fileSearching && (
+                      <>
+                        {fileSearchResults.files.length > 0 && (
+                          <div className="file-search-section">
+                            <div className="file-search-section-title">
+                              <File size={12} /> Files ({fileSearchResults.files.length})
+                            </div>
+                            {fileSearchResults.files.map((f: any) => (
+                              <div
+                                key={f.path}
+                                className={`file-node file-node-file file-search-result-item ${fileContent?.path === f.path ? 'file-node-active' : ''}`}
+                                onClick={() => loadFile(f.path)}
+                              >
+                                <File size={13} className="file-node-icon" />
+                                <span className="file-search-result-path">{f.path}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        {fileSearchResults.contentMatches.length > 0 && (
+                          <div className="file-search-section">
+                            <div className="file-search-section-title">
+                              <FileText size={12} /> Content matches ({fileSearchResults.contentMatches.length})
+                            </div>
+                            {fileSearchResults.contentMatches.map((m: any, i: number) => (
+                              <div
+                                key={`${m.path}:${m.line}:${i}`}
+                                className={`file-search-content-match ${fileContent?.path === m.path ? 'file-node-active' : ''}`}
+                                onClick={() => loadFile(m.path)}
+                              >
+                                <div className="file-search-match-path">
+                                  <File size={11} className="file-node-icon" />
+                                  {m.path}:{m.line}
+                                </div>
+                                <div className="file-search-match-text">{m.text}</div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        {fileSearchResults.files.length === 0 && fileSearchResults.contentMatches.length === 0 && (
+                          <div className="file-search-status">No results found</div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                ) : (
+                  // Tree view
+                  files.length === 0 ? (
+                    <div className="file-search-status">No files found</div>
+                  ) : (
+                    <FileTree nodes={files} onSelect={loadFile} selectedPath={fileContent?.path} />
+                  )
+                )}
+              </div>
             </div>
-            <div style={{ flex: 1 }}>
+
+            {/* Right panel: file content */}
+            <div className="file-explorer-content">
               {fileContent ? (
-                <div>
-                  <div className="text-sm font-mono text-muted mb-2">{fileContent.path}</div>
-                  <pre className="terminal" style={{ maxHeight: '50vh', whiteSpace: 'pre-wrap' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+                  <div className="file-content-header">
+                    <span className="file-content-path">{fileContent.path}</span>
+                  </div>
+                  <pre className="terminal file-content-body" style={{ whiteSpace: 'pre-wrap' }}>
                     {fileContent.content}
                   </pre>
                 </div>
               ) : (
-                <div className="text-sm text-muted">Select a file to view</div>
+                <div className="file-content-empty">
+                  <FileText size={32} style={{ opacity: 0.3 }} />
+                  <div>Select a file to view</div>
+                </div>
               )}
             </div>
           </div>
         )}
+        {/* ── Git tab ── */}
+        {tab === 'git' && (
+          <div className="git-panel" style={{ height: '100%' }}>
+            {gitStatus === null ? (
+              <div className="git-empty">
+                {gitLoading ? 'Loading git status...' : 'Unable to load git status'}
+              </div>
+            ) : !gitStatus.isGitRepo ? (
+              <div className="git-empty">
+                <GitBranch size={32} style={{ opacity: 0.3 }} />
+                <div>Not a git repository</div>
+              </div>
+            ) : (
+              <>
+                {/* Git toolbar */}
+                <div className="git-toolbar">
+                  <div className="git-toolbar-left">
+                    <span className="git-branch-badge">
+                      <GitBranch size={12} /> {gitStatus.branch}
+                    </span>
+                    {gitStatus.ahead > 0 && <span className="git-sync-badge git-ahead">↑{gitStatus.ahead}</span>}
+                    {gitStatus.behind > 0 && <span className="git-sync-badge git-behind">↓{gitStatus.behind}</span>}
+                    <div className="git-toggle-group">
+                      <button
+                        className={`git-toggle-btn ${!gitShowStaged ? 'active' : ''}`}
+                        onClick={() => { setGitShowStaged(false); if (gitSelectedFile) loadGitFileDiff(gitSelectedFile, false); }}
+                      >Working</button>
+                      <button
+                        className={`git-toggle-btn ${gitShowStaged ? 'active' : ''}`}
+                        onClick={() => { setGitShowStaged(true); if (gitSelectedFile) loadGitFileDiff(gitSelectedFile, true); }}
+                      >Staged</button>
+                    </div>
+                  </div>
+                  <div className="git-toolbar-right">
+                    <button className="btn btn-sm" onClick={() => handleGitAction('add_all')} title="Stage all changes">
+                      <Plus size={12} /> Stage All
+                    </button>
+                    <button className="btn btn-sm" onClick={() => handleGitAction('pull')} title="Git pull">
+                      <Download size={12} /> Pull
+                    </button>
+                    <button className="btn btn-sm" onClick={() => handleGitAction('push')} title="Git push">
+                      <Upload size={12} /> Push
+                    </button>
+                    <button className="git-refresh-btn" onClick={refreshGitStatus} title="Refresh">
+                      <RefreshCw size={13} />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Action output notification */}
+                {gitActionOutput && (
+                  <div className={`git-action-output ${gitActionOutput.ok ? 'git-action-ok' : 'git-action-err'}`}>
+                    <span>{gitActionOutput.text}</span>
+                    <X size={12} className="git-action-close" onClick={() => setGitActionOutput(null)} />
+                  </div>
+                )}
+
+                {/* Main content: file list + diff */}
+                <div className="git-content">
+                  {/* Left: changed files list */}
+                  <div className="git-file-list">
+                    {/* Staged files */}
+                    {gitStatus.staged.length > 0 && (
+                      <div className="git-section">
+                        <div className="git-section-title">
+                          <Check size={12} /> Staged ({gitStatus.staged.length})
+                        </div>
+                        {gitStatus.staged.map((f: any) => {
+                          const touched = isJobTouchedFile(f.path);
+                          return (
+                            <div
+                              key={`staged-${f.path}`}
+                              className={`git-file-item ${gitSelectedFile === f.path && gitShowStaged ? 'git-file-active' : ''} ${touched ? 'git-file-job-touched' : ''}`}
+                              onClick={() => { setGitShowStaged(true); loadGitFileDiff(f.path, true); }}
+                            >
+                              <span className="git-file-status git-status-staged">{f.status}</span>
+                              {touched && <span title="Modified by this job"><Star size={10} className="git-job-marker" /></span>}
+                              <span className="git-file-path" title={f.path}>{f.path}</span>
+                              <button
+                                className="git-file-action"
+                                onClick={e => { e.stopPropagation(); handleGitAction('discard', { files: [f.path] }); }}
+                                title="Unstage (discard)"
+                              >
+                                <Undo2 size={11} />
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {/* Unstaged (modified) files */}
+                    {gitStatus.unstaged.length > 0 && (
+                      <div className="git-section">
+                        <div className="git-section-title">
+                          <Edit3 size={12} /> Modified ({gitStatus.unstaged.length})
+                        </div>
+                        {gitStatus.unstaged.map((f: any) => {
+                          const touched = isJobTouchedFile(f.path);
+                          return (
+                            <div
+                              key={`unstaged-${f.path}`}
+                              className={`git-file-item ${gitSelectedFile === f.path && !gitShowStaged ? 'git-file-active' : ''} ${touched ? 'git-file-job-touched' : ''}`}
+                              onClick={() => { setGitShowStaged(false); loadGitFileDiff(f.path, false); }}
+                            >
+                              <span className="git-file-status git-status-modified">{f.status}</span>
+                              {touched && <span title="Modified by this job"><Star size={10} className="git-job-marker" /></span>}
+                              <span className="git-file-path" title={f.path}>{f.path}</span>
+                              <div className="git-file-actions">
+                                <button
+                                  className="git-file-action"
+                                  onClick={e => { e.stopPropagation(); handleGitAction('add', { files: [f.path] }); }}
+                                  title="Stage file"
+                                >
+                                  <Plus size={11} />
+                                </button>
+                                <button
+                                  className="git-file-action git-file-action-danger"
+                                  onClick={e => { e.stopPropagation(); handleGitAction('discard', { files: [f.path] }); }}
+                                  title="Discard changes"
+                                >
+                                  <Undo2 size={11} />
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {/* Untracked files */}
+                    {gitStatus.untracked.length > 0 && (
+                      <div className="git-section">
+                        <div className="git-section-title">
+                          <File size={12} /> Untracked ({gitStatus.untracked.length})
+                        </div>
+                        {gitStatus.untracked.map((filePath: string) => {
+                          const touched = isJobTouchedFile(filePath);
+                          return (
+                            <div
+                              key={`untracked-${filePath}`}
+                              className={`git-file-item ${touched ? 'git-file-job-touched' : ''}`}
+                            >
+                              <span className="git-file-status git-status-untracked">?</span>
+                              {touched && <span title="Created by this job"><Star size={10} className="git-job-marker" /></span>}
+                              <span className="git-file-path" title={filePath}>{filePath}</span>
+                              <button
+                                className="git-file-action"
+                                onClick={e => { e.stopPropagation(); handleGitAction('add', { files: [filePath] }); }}
+                                title="Stage file"
+                              >
+                                <Plus size={11} />
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {gitStatus.staged.length === 0 && gitStatus.unstaged.length === 0 && gitStatus.untracked.length === 0 && (
+                      <div className="git-empty-small">No changes detected</div>
+                    )}
+
+                    {/* Job touched files legend */}
+                    {jobTouchedFiles.size > 0 && (
+                      <div className="git-legend">
+                        <Star size={10} className="git-job-marker" />
+                        <span>= touched by this job</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Right: diff viewer */}
+                  <div className="git-diff-panel">
+                    {gitSelectedFile ? (
+                      <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+                        <div className="git-diff-header">
+                          <span className="git-diff-filename">{gitSelectedFile}</span>
+                          {isJobTouchedFile(gitSelectedFile) && (
+                            <span className="git-diff-job-badge">
+                              <Star size={10} /> this job
+                            </span>
+                          )}
+                        </div>
+                        <pre className="git-diff-body">
+                          {gitFileDiff.split('\n').map((line, i) => {
+                            let cls = 'git-diff-line';
+                            if (line.startsWith('+') && !line.startsWith('+++')) cls += ' git-diff-add';
+                            else if (line.startsWith('-') && !line.startsWith('---')) cls += ' git-diff-del';
+                            else if (line.startsWith('@@')) cls += ' git-diff-hunk';
+                            else if (line.startsWith('diff ') || line.startsWith('index ') || line.startsWith('---') || line.startsWith('+++')) cls += ' git-diff-meta';
+                            return <div key={i} className={cls}>{line || ' '}</div>;
+                          })}
+                        </pre>
+                      </div>
+                    ) : (
+                      <div className="git-empty">
+                        <GitBranch size={32} style={{ opacity: 0.3 }} />
+                        <div>Select a file to view diff</div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Commit bar */}
+                <div className="git-commit-bar">
+                  <input
+                    className="git-commit-input"
+                    placeholder="Commit message..."
+                    value={gitCommitMsg}
+                    onChange={e => setGitCommitMsg(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter' && gitCommitMsg.trim()) {
+                        handleGitAction('commit', { message: gitCommitMsg.trim() });
+                        setGitCommitMsg('');
+                      }
+                    }}
+                  />
+                  <button
+                    className="btn btn-primary btn-sm"
+                    disabled={!gitCommitMsg.trim() || gitStatus.staged.length === 0}
+                    onClick={() => {
+                      if (gitCommitMsg.trim()) {
+                        handleGitAction('commit', { message: gitCommitMsg.trim() });
+                        setGitCommitMsg('');
+                      }
+                    }}
+                  >
+                    <Check size={12} /> Commit
+                  </button>
+                  <button
+                    className="btn btn-sm"
+                    disabled={gitStatus.ahead === 0}
+                    onClick={() => handleGitAction('push')}
+                  >
+                    <Upload size={12} /> Push
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
         {/* ── Memories tab ── */}
         {tab === 'memories' && (
           <div className="memories-container">
@@ -1059,20 +1577,50 @@ export function JobDetail({ job, logs, projectId }: Props) {
   );
 }
 
-function FileTree({ nodes, onSelect, depth = 0 }: { nodes: any[]; onSelect: (p: string) => void; depth?: number }) {
+function FileTreeNode({ node, onSelect, selectedPath, depth = 0 }: { node: any; onSelect: (p: string) => void; selectedPath?: string; depth?: number }) {
+  const [expanded, setExpanded] = useState(depth === 0); // only top-level dirs expanded by default
+
+  if (!node.isDir) {
+    return (
+      <div
+        className={`file-node file-node-file ${selectedPath === node.path ? 'file-node-active' : ''}`}
+        onClick={() => onSelect(node.path)}
+        style={{ paddingLeft: depth * 16 + 8 }}
+      >
+        <File size={13} className="file-node-icon" />
+        <span className="file-node-name">{node.name}</span>
+      </div>
+    );
+  }
+
   return (
-    <div style={{ paddingLeft: depth * 12 }}>
-      {nodes.map((n: any) => (
-        <div key={n.path}>
-          <div
-            className="file-node"
-            onClick={() => !n.isDir && onSelect(n.path)}
-            style={{ opacity: n.isDir ? 0.7 : 1, fontWeight: n.isDir ? 500 : 400 }}
-          >
-            {n.isDir ? '📁' : '📄'} {n.name}
-          </div>
-          {n.isDir && n.children && <FileTree nodes={n.children} onSelect={onSelect} depth={depth + 1} />}
+    <div>
+      <div
+        className="file-node file-node-dir"
+        onClick={() => setExpanded(!expanded)}
+        style={{ paddingLeft: depth * 16 + 8 }}
+      >
+        <ChevronRight size={12} className={`file-node-chevron ${expanded ? 'file-node-chevron-open' : ''}`} />
+        {expanded ? <FolderOpen size={13} className="file-node-icon file-node-icon-dir" /> : <Folder size={13} className="file-node-icon file-node-icon-dir" />}
+        <span className="file-node-name">{node.name}</span>
+        {node.children && <span className="file-node-count">{node.children.length}</span>}
+      </div>
+      {expanded && node.children && (
+        <div>
+          {node.children.map((child: any) => (
+            <FileTreeNode key={child.path} node={child} onSelect={onSelect} selectedPath={selectedPath} depth={depth + 1} />
+          ))}
         </div>
+      )}
+    </div>
+  );
+}
+
+function FileTree({ nodes, onSelect, selectedPath }: { nodes: any[]; onSelect: (p: string) => void; selectedPath?: string }) {
+  return (
+    <div className="file-tree">
+      {nodes.map((n: any) => (
+        <FileTreeNode key={n.path} node={n} onSelect={onSelect} selectedPath={selectedPath} depth={0} />
       ))}
     </div>
   );
