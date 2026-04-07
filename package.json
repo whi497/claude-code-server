@@ -1,0 +1,13 @@
+{
+  "name": "claude-code-server",
+  "private": true,
+  "scripts": {
+    "dev:server": "cd server && npx tsx src/index.ts",
+    "dev:client": "cd client && npx vite",
+    "build:client": "cd client && npx vite build",
+    "dev": "npx concurrently \"npm run dev:server\" \"npm run dev:client\""
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.0"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "Backend Server",
+      "runtimeExecutable": "/opt/homebrew/Cellar/node/25.2.1/bin/node",
+      "runtimeArgs": ["/Users/yeziang/Downloads/claude-code-server/server/node_modules/.bin/tsx", "server/src/index.ts"],
+      "port": 3001,
+      "autoPort": true
+    },
+    {
+      "name": "Frontend Dev Server",
+      "runtimeExecutable": "/opt/homebrew/Cellar/node/25.2.1/bin/node",
+      "runtimeArgs": ["/Users/yeziang/Downloads/claude-code-server/client/node_modules/.bin/vite", "--config", "client/vite.config.ts"],
+      "port": 5173,
+      "autoPort": true
+    }
+  ]
+}
