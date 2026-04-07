@@ -637,7 +637,7 @@ function CollapsibleUserText({ text }: { text: string }) {
 
   return (
     <div className="chat-user-collapsible">
-      <div className={`chat-user-text-body ${expanded ? '' : 'chat-user-text-collapsed'}`}>
+      <div className={`chat-user-text-body chat-message-text ${expanded ? '' : 'chat-user-text-collapsed'}`}>
         {renderMarkdown(text)}
         {!expanded && <span className="chat-user-text-fade" />}
       </div>
@@ -701,12 +701,12 @@ export function JobDetail({ job, logs, projectId }: Props) {
       setEditingMemory(null);
       api.getMemories(projectId).then((d: any) => setMemorySections(d.sections ?? [])).catch(() => setMemorySections([]));
     } else if (tab === 'cron') {
-      api.getCron(projectId).then((data: any) => {
+      api.getCron(projectId, job.id).then((data: any) => {
         setCronTasks(data.tasks ?? []);
         setCronPath(data.path ?? '');
       }).catch(() => { setCronTasks([]); setCronPath(''); });
     }
-  }, [tab, projectId]);
+  }, [tab, projectId, job.id]);
 
   const handleSaveMemory = async () => {
     if (!editingMemory) return;
@@ -900,7 +900,7 @@ export function JobDetail({ job, logs, projectId }: Props) {
 
         {/* ── Output tab (raw logs) ── */}
         {tab === 'output' && (
-          <>
+          <div className="output-tab-wrapper">
             <div className="terminal" ref={termRef}>
               {allLogs.length === 0 && (
                 <div style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>
@@ -913,7 +913,7 @@ export function JobDetail({ job, logs, projectId }: Props) {
             </div>
 
             {showInput && (
-              <div className="flex gap-2" style={{ marginTop: 12 }}>
+              <div className="chat-input-bar">
                 <input
                   className="input flex-1"
                   placeholder={canSendMessage ? 'Send message to session...' : 'Send follow-up prompt to continue session...'}
@@ -926,7 +926,7 @@ export function JobDetail({ job, logs, projectId }: Props) {
                 </button>
               </div>
             )}
-          </>
+          </div>
         )}
 
         {/* ── Files tab ── */}
@@ -1038,6 +1038,7 @@ export function JobDetail({ job, logs, projectId }: Props) {
                         {task.recurring === false ? 'once' : 'recurring'}
                       </span>
                       {task.durable && <span className="cron-durable-badge">durable</span>}
+                      {task.source === 'session' && <span className="cron-session-badge">session</span>}
                       {task.id && <span className="cron-id">{task.id.slice(0, 8)}</span>}
                     </div>
                     <div className="cron-prompt">{task.prompt ?? '(no prompt)'}</div>
