@@ -1,3 +1,4 @@
+import { useState, useRef, useEffect } from 'react';
 import type { Job } from '../types';
 import { Clock, DollarSign } from 'lucide-react';
 
@@ -5,6 +6,7 @@ interface Props {
   jobs: Job[];
   selectedJobId: string | null;
   onSelect: (id: string) => void;
+  onRename: (id: string, name: string) => void;
 }
 
 function timeAgo(iso: string) {
@@ -15,7 +17,33 @@ function timeAgo(iso: string) {
   return `${Math.floor(s / 86400)}d ago`;
 }
 
-export function JobList({ jobs, selectedJobId, onSelect }: Props) {
+export function JobList({ jobs, selectedJobId, onSelect, onRename }: Props) {
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (editingId && inputRef.current) {
+      inputRef.current.focus();
+      inputRef.current.select();
+    }
+  }, [editingId]);
+
+  const handleDoubleClick = (j: Job, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setEditingId(j.id);
+    setEditValue(j.name || j.prompt.slice(0, 80));
+  };
+
+  const commitRename = () => {
+    if (editingId && editValue.trim()) {
+      onRename(editingId, editValue.trim());
+    }
+    setEditingId(null);
+  };
+
+  const cancelRename = () => setEditingId(null);
+
   if (jobs.length === 0) {
     return (
       <div className="empty-state" style={{ padding: '40px 16px' }}>
@@ -25,7 +53,7 @@ export function JobList({ jobs, selectedJobId, onSelect }: Props) {
   }
 
   return (
-    <div style={{ overflow: 'auto', flex: 1, padding: '12px' }}>
+    <div style={{ overflow: 'auto', flex: 1, padding: '8px' }}>
       {jobs.map(j => (
         <div
           key={j.id}
@@ -33,26 +61,50 @@ export function JobList({ jobs, selectedJobId, onSelect }: Props) {
           onClick={() => onSelect(j.id)}
         >
           <div className="job-card-header">
-            <span className={`badge badge-${j.status}`}>
+            <span className={`badge badge-${j.status}`} style={{ fontSize: 10, padding: '1px 6px', flexShrink: 0 }}>
               {j.status === 'running' ? <span className="running-indicator">{j.status}</span>
-                : j.status === 'idle' ? <span className="running-indicator">● session</span>
+                : j.status === 'idle' ? <span className="running-indicator">idle</span>
                 : j.status}
             </span>
-            {j.mode === 'session' && j.status !== 'idle' && j.status !== 'running' && (
-              <span style={{ fontSize: 9, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>session</span>
+            {j.mode === 'session' && (
+              <span style={{ fontSize: 9, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', flexShrink: 0 }}>S</span>
             )}
-          </div>
-          <div className="prompt">{j.prompt}</div>
-          <div className="meta">
-            <span className="flex items-center gap-2">
-              <Clock size={10} /> {timeAgo(j.createdAt)}
-            </span>
-            {j.costUsd != null && (
-              <span className="flex items-center gap-2">
-                <DollarSign size={10} /> ${j.costUsd.toFixed(4)}
+            {editingId === j.id ? (
+              <input
+                ref={inputRef}
+                className="job-card-title-input"
+                value={editValue}
+                onChange={e => setEditValue(e.target.value)}
+                onBlur={commitRename}
+                onKeyDown={e => {
+                  if (e.key === 'Enter') commitRename();
+                  if (e.key === 'Escape') cancelRename();
+                }}
+                onClick={e => e.stopPropagation()}
+              />
+            ) : (
+              <span
+                className="job-card-title"
+                onDoubleClick={e => handleDoubleClick(j, e)}
+                title={j.prompt}
+              >
+                {j.name || j.prompt}
               </span>
             )}
+            <div className="meta" style={{ marginTop: 0, flexShrink: 0 }}>
+              <span className="flex items-center gap-2">
+                <Clock size={9} /> {timeAgo(j.createdAt)}
+              </span>
+              {j.costUsd != null && (
+                <span className="flex items-center gap-2">
+                  <DollarSign size={9} /> ${j.costUsd.toFixed(2)}
+                </span>
+              )}
+            </div>
           </div>
+          {j.name && (
+            <div className="prompt">{j.prompt}</div>
+          )}
         </div>
       ))}
     </div>

@@ -1,17 +1,20 @@
-import { useEffect, useRef, useCallback, useState } from 'react';
-import type { Project, Job, LogEntry } from '../types';
+import { useEffect, useRef, useCallback, useState, useMemo } from 'react';
+import type { Project, Job, LogEntry, ApprovalRequest } from '../types';
 
 type WSEvent =
-  | { event: 'init'; data: { projects: Project[]; jobs: Job[] } }
+  | { event: 'init'; data: { projects: Project[]; jobs: Job[]; approvals?: ApprovalRequest[] } }
   | { event: 'project:created'; data: Project }
   | { event: 'job:created'; data: Job }
   | { event: 'job:updated'; data: Job }
-  | { event: 'job:log'; data: { jobId: string; log: LogEntry } };
+  | { event: 'job:log'; data: { jobId: string; log: LogEntry } }
+  | { event: 'approval:created'; data: ApprovalRequest }
+  | { event: 'approval:updated'; data: ApprovalRequest };
 
 interface StoreState {
   projects: Project[];
   jobs: Job[];
   jobLogs: Record<string, LogEntry[]>;
+  approvals: ApprovalRequest[];
   connected: boolean;
 }
 
@@ -20,6 +23,7 @@ export function useStore() {
     projects: [],
     jobs: [],
     jobLogs: {},
+    approvals: [],
     connected: false,
   });
   const wsRef = useRef<WebSocket | null>(null);
@@ -51,7 +55,7 @@ export function useStore() {
       setState(s => {
         switch (msg.event) {
           case 'init':
-            return { ...s, projects: msg.data.projects, jobs: msg.data.jobs, jobLogs: {} };
+            return { ...s, projects: msg.data.projects, jobs: msg.data.jobs, jobLogs: {}, approvals: msg.data.approvals ?? [] };
           case 'project:created':
             if (s.projects.some(p => p.id === msg.data.id)) return s;
             return { ...s, projects: [...s.projects, msg.data] };
@@ -66,6 +70,14 @@ export function useStore() {
             const { jobId, log } = msg.data;
             const existing = s.jobLogs[jobId] ?? [];
             return { ...s, jobLogs: { ...s.jobLogs, [jobId]: [...existing, log] } };
+          }
+          case 'approval:created': {
+            if (s.approvals.some(a => a.id === msg.data.id)) return s;
+            return { ...s, approvals: [msg.data, ...s.approvals] };
+          }
+          case 'approval:updated': {
+            const updated = msg.data;
+            return { ...s, approvals: s.approvals.map(a => a.id === updated.id ? updated : a) };
           }
           default:
             return s;
@@ -86,5 +98,10 @@ export function useStore() {
     };
   }, [connect]);
 
-  return state;
+  const pendingApprovals = useMemo(
+    () => state.approvals.filter(a => a.status === 'pending'),
+    [state.approvals]
+  );
+
+  return { ...state, pendingApprovals };
 }

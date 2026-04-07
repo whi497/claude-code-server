@@ -154,3 +154,10 @@ interface LogEntry {
 6. **CORS wide open**: `cors()` with no config — restrict in production
 7. **No auth**: zero authentication — designed for local/trusted network only
 8. **React StrictMode** is enabled in dev — WebSocket code must handle double-mount
+
+
+## Claude-Agent-SDK develop ref
+@https://platform.claude.com/docs/en/agent-sdk/overview
+@https://platform.claude.com/docs/en/agent-sdk/agent-loop
+@https://platform.claude.com/docs/en/agent-sdk/streaming-vs-single-mode
+@https://platform.claude.com/docs/en/agent-sdk/streaming-output

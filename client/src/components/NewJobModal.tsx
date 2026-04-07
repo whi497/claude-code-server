@@ -50,9 +50,9 @@ export function NewJobModal({ projectId, onClose, onCreated }: Props) {
             onChange={e => setSessionMode(e.target.checked)}
             style={{ accentColor: 'var(--accent)' }}
           />
-          <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>Long-running session</span>
+          <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>Start as persistent session</span>
           <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-            — keeps process alive between prompts
+            — auto-enabled when cron job detected
           </span>
         </label>
         {error && <p style={{ color: 'var(--danger)', fontSize: 12, marginTop: 8 }}>{error}</p>}
