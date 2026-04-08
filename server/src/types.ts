@@ -24,11 +24,24 @@ export interface Job {
   logs: LogEntry[];
 }
 
+export type LogType = 'text' | 'tool' | 'tool_result' | 'thinking' | 'system' | 'error' | 'result' | 'user';
+
 export interface LogEntry {
   timestamp: string;
-  type: 'text' | 'tool' | 'tool_result' | 'system' | 'error' | 'result' | 'user';
+  type: LogType;
   content: string;
-  meta?: Record<string, unknown>;
+  meta?: {
+    input?: unknown;                // tool input (for type='tool')
+    tool_use_id?: string;           // for tool/tool_result pairing
+    parent_tool_use_id?: string;    // for subagent nesting
+    block_type?: string;            // for streaming partials
+    is_error?: boolean;             // for tool_result errors
+    // Subagent lifecycle
+    subagent_task_id?: string;      // Agent SDK task ID
+    subagent_status?: 'started' | 'progress' | 'completed' | 'failed';
+    subagent_usage?: { input_tokens?: number; output_tokens?: number };
+    [key: string]: unknown;
+  };
 }
 
 // ── Approval types ──────────────────────────────────────────────

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { api } from '../hooks/api';
-import { useSuggestions, type CommandDef } from '../hooks/useSuggestions';
+import { useSuggestions, type CommandDef, type SDKSlashCommand } from '../hooks/useSuggestions';
 import { SuggestionDropdown } from './SuggestionDropdown';
 import type { Job, LogEntry } from '../types';
 import { Square, Archive, Play, FolderTree, ScrollText, MessageSquare, ChevronDown, ChevronRight, Wrench, Terminal, FileText, Search, Edit3, PenTool, Globe, Bot, FileCode, Copy, BookOpen, Clock, Save, X, Folder, FolderOpen, File, RefreshCw, GitBranch, Plus, Upload, Download, Check, Undo2, Star } from 'lucide-react';
@@ -17,10 +17,52 @@ function formatTime(iso: string) {
   return new Date(iso).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
+// ── Per-tool border colors (from claude_web's tool-configs.js) ──
+function getToolBorderColor(name: string): string {
+  switch (name) {
+    case 'Bash':
+      return 'var(--tool-border-green, #22c55e)';
+    case 'Write':
+      return 'var(--tool-border-green, #22c55e)';
+    case 'Edit':
+    case 'NotebookEdit':
+      return 'var(--tool-border-amber, #f59e0b)';
+    case 'Read':
+    case 'Grep':
+    case 'Glob':
+    case 'CronCreate':
+    case 'CronDelete':
+    case 'CronList':
+      return 'var(--tool-border-gray, #6b7280)';
+    case 'LSP':
+    case 'WebSearch':
+    case 'WebFetch':
+    case 'AskUserQuestion':
+    case 'EnterPlanMode':
+      return 'var(--tool-border-blue, #3b82f6)';
+    case 'ExitPlanMode':
+      return 'var(--tool-border-indigo, #6366f1)';
+    case 'TaskCreate':
+    case 'TaskUpdate':
+    case 'TaskList':
+    case 'TaskGet':
+    case 'TodoWrite':
+    case 'TodoRead':
+      return 'var(--tool-border-violet, #8b5cf6)';
+    case 'Agent':
+    case 'Skill':
+      return 'var(--tool-border-purple, #a855f7)';
+    default:
+      return 'var(--tool-border-gray, #6b7280)';
+  }
+}
+
 // ── Chat message grouping (ordered parts) ────────────────────
 type ChatPart =
   | { kind: 'text'; text: string }
-  | { kind: 'tool'; name: string; input: unknown; result?: string; id?: string };
+  | { kind: 'thinking'; text: string }
+  | { kind: 'tool'; name: string; input: unknown; result?: string; id?: string; isError?: boolean;
+      children?: ChatPart[] };    // subagent nested tool calls
 
 interface ChatMessage {
   role: 'assistant' | 'user';
@@ -34,13 +76,28 @@ function groupLogsIntoChatMessages(logs: LogEntry[], isRunning: boolean): ChatMe
   const messages: ChatMessage[] = [];
   let current: ChatMessage | null = null;
 
+  // Build a map of tool_use_id → tool ChatPart for ID-based result matching
+  const toolPartById = new Map<string, ChatPart & { kind: 'tool' }>();
+  // Track orphaned parts whose parent hasn't been seen yet (for re-parenting at end)
+  const orphans: { parentId: string; part: ChatPart; msgIdx: number; partIdx: number }[] = [];
+
   const flush = () => {
     if (current) messages.push(current);
     current = null;
   };
 
+  // Helper: find the parent Agent tool part to nest child parts into
+  const findParentTool = (parentToolUseId: string): (ChatPart & { kind: 'tool' }) | undefined => {
+    return toolPartById.get(parentToolUseId);
+  };
+
   for (const log of logs) {
     if (log.type === 'system') continue;
+
+    // Skip subagent lifecycle events (they're handled via the parent tool)
+    if (log.meta?.subagent_status) continue;
+
+    const parentId = log.meta?.parent_tool_use_id;
 
     if (log.type === 'user') {
       flush();
@@ -49,32 +106,99 @@ function groupLogsIntoChatMessages(logs: LogEntry[], isRunning: boolean): ChatMe
       continue;
     }
 
-    if (log.type === 'text') {
+    if (log.type === 'thinking') {
       if (!current || current.role !== 'assistant' || current.isResult) {
         flush();
         current = { role: 'assistant', parts: [], timestamp: log.timestamp };
       }
-      // Append to last text part if exists, otherwise create new one
+      // Merge consecutive thinking parts
       const lastPart = current.parts[current.parts.length - 1];
-      if (lastPart && lastPart.kind === 'text') {
+      if (lastPart && lastPart.kind === 'thinking') {
         lastPart.text += '\n' + log.content;
       } else {
-        current.parts.push({ kind: 'text', text: log.content });
+        current.parts.push({ kind: 'thinking', text: log.content });
       }
-    } else if (log.type === 'tool') {
+      continue;
+    }
+
+    if (log.type === 'text') {
+      // If this is a subagent text, nest it
+      if (parentId) {
+        const parent = findParentTool(parentId);
+        if (parent) {
+          if (!parent.children) parent.children = [];
+          const lastChild = parent.children[parent.children.length - 1];
+          if (lastChild && lastChild.kind === 'text') {
+            lastChild.text += '\n' + log.content;
+          } else {
+            parent.children.push({ kind: 'text', text: log.content });
+          }
+          continue;
+        }
+        // Parent not found yet — place at top level, record as orphan for re-parenting
+      }
       if (!current || current.role !== 'assistant' || current.isResult) {
         flush();
         current = { role: 'assistant', parts: [], timestamp: log.timestamp };
       }
+      const textPart: ChatPart = { kind: 'text', text: log.content };
+      const lastPart = current.parts[current.parts.length - 1];
+      if (!parentId && lastPart && lastPart.kind === 'text') {
+        lastPart.text += '\n' + log.content;
+      } else {
+        current.parts.push(textPart);
+        if (parentId) {
+          orphans.push({ parentId, part: textPart, msgIdx: messages.length, partIdx: current.parts.length - 1 });
+        }
+      }
+    } else if (log.type === 'tool') {
       const toolName = log.content.replace(/^🔧\s*/, '');
-      current.parts.push({ kind: 'tool', name: toolName, input: log.meta?.input, id: log.meta?.tool_use_id as string });
+      const toolUseId = log.meta?.tool_use_id;
+
+      // Subagent tool call → nest inside parent
+      if (parentId) {
+        const parent = findParentTool(parentId);
+        if (parent) {
+          if (!parent.children) parent.children = [];
+          const childTool: ChatPart & { kind: 'tool' } = { kind: 'tool', name: toolName, input: log.meta?.input, id: toolUseId };
+          parent.children.push(childTool);
+          if (toolUseId) toolPartById.set(toolUseId, childTool);
+          continue;
+        }
+        // Parent not found yet — place at top level, record as orphan for re-parenting
+      }
+
+      if (!current || current.role !== 'assistant' || current.isResult) {
+        flush();
+        current = { role: 'assistant', parts: [], timestamp: log.timestamp };
+      }
+      const toolPart: ChatPart & { kind: 'tool' } = { kind: 'tool', name: toolName, input: log.meta?.input, id: toolUseId };
+      current.parts.push(toolPart);
+      if (toolUseId) toolPartById.set(toolUseId, toolPart);
+      if (parentId) {
+        orphans.push({ parentId, part: toolPart, msgIdx: messages.length, partIdx: current.parts.length - 1 });
+      }
     } else if (log.type === 'tool_result') {
-      // Attach result to the last tool part in current message
+      const resultToolUseId = log.meta?.tool_use_id;
+      const isError = log.meta?.is_error;
+
+      // Try ID-based matching first (most reliable)
+      if (resultToolUseId) {
+        const matchedTool = toolPartById.get(resultToolUseId);
+        if (matchedTool) {
+          matchedTool.result = log.content;
+          if (isError) matchedTool.isError = true;
+          continue;
+        }
+      }
+
+      // Fallback: attach to the last tool part without a result (backward scan)
       if (current) {
         for (let j = current.parts.length - 1; j >= 0; j--) {
           const p = current.parts[j];
           if (p.kind === 'tool' && !p.result) {
             p.result = log.content;
+            if (isError) p.isError = true;
             break;
           }
         }
@@ -88,7 +212,25 @@ function groupLogsIntoChatMessages(logs: LogEntry[], isRunning: boolean): ChatMe
     }
   }
   flush();
-  return messages;
+
+  // Re-parent orphaned parts whose parent wasn't seen at creation time
+  // Process in reverse so index-based removal doesn't shift subsequent indices
+  for (let o = orphans.length - 1; o >= 0; o--) {
+    const { parentId: opId, part, msgIdx, partIdx } = orphans[o];
+    const parent = toolPartById.get(opId);
+    if (!parent) continue;  // parent still not found — leave at top level
+    // Add to parent's children
+    if (!parent.children) parent.children = [];
+    parent.children.push(part);
+    // Remove from the original top-level message.parts
+    const msg = messages[msgIdx];
+    if (msg && msg.parts[partIdx] === part) {
+      msg.parts.splice(partIdx, 1);
+    }
+  }
+
+  // Clean up empty messages that may result from orphan removal
+  return messages.filter(m => m.parts.length > 0);
 }
 
 // ── Tool icons and smart summaries ────────────────────────────
@@ -430,17 +572,52 @@ function ToolBodyDefault({ result }: { result?: string }) {
   return <pre className="chat-tool-code chat-tool-output">{truncated}</pre>;
 }
 
+// ── Thinking block (collapsible) ──────────────────────────────
+function ThinkingBlock({ text }: { text: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const preview = text.length > 80 ? text.slice(0, 80) + '…' : text;
+
+  return (
+    <div className="chat-thinking-block" onClick={() => setExpanded(!expanded)}>
+      <div className="chat-thinking-header">
+        <span className="chat-tool-chevron">
+          {expanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+        </span>
+        <span className="chat-thinking-label">Thinking</span>
+        {!expanded && <span className="chat-thinking-preview">{preview}</span>}
+      </div>
+      {expanded && (
+        <div className="chat-thinking-content">{text}</div>
+      )}
+    </div>
+  );
+}
+
 // ── ToolCall collapsible block ─────────────────────────────────
-function ToolCallBlock({ tool, isJobRunning, isLastInGroup }: { tool: { name: string; input: unknown; result?: string }; isJobRunning: boolean; isLastInGroup: boolean }) {
+function ToolCallBlock({ tool, isJobRunning, isLastInGroup, depth = 0 }: {
+  tool: { name: string; input: unknown; result?: string; isError?: boolean; children?: ChatPart[] };
+  isJobRunning: boolean;
+  isLastInGroup: boolean;
+  depth?: number;
+}) {
   const isActive = isJobRunning && isLastInGroup && !tool.result;
-  const defaultOpen = tool.name === 'TodoWrite' || tool.name === 'Edit' || tool.name === 'Write';
+  const isAgent = tool.name === 'Agent';
+  const isNested = depth > 0;
+  // Default open: TodoWrite/Edit/Write always open; Agent open while running;
+  // Nested (subagent) blocks default collapsed
+  const defaultOpen = isNested ? false : (tool.name === 'TodoWrite' || tool.name === 'Edit' || tool.name === 'Write' || isAgent);
   const [expanded, setExpanded] = useState(isActive || defaultOpen);
   const [showRaw, setShowRaw] = useState(false);
+  const borderColor = getToolBorderColor(tool.name);
+  const hasChildren = tool.children && tool.children.length > 0;
 
   useEffect(() => {
     if (isActive) setExpanded(true);
+    // Agent: auto-collapse when complete (result arrives)
+    else if (isAgent && tool.result !== undefined) setExpanded(false);
+    // Non-Agent: auto-collapse when result arrives (except always-open tools)
     else if (tool.result !== undefined && !defaultOpen) setExpanded(false);
-  }, [isActive, tool.result, defaultOpen]);
+  }, [isActive, tool.result, defaultOpen, isAgent]);
 
   const summary = getToolSummary(tool.name, tool.input);
   const icon = getToolIcon(tool.name);
@@ -465,29 +642,70 @@ function ToolCallBlock({ tool, isJobRunning, isLastInGroup }: { tool: { name: st
       );
     }
 
-    switch (tool.name) {
-      case 'TodoWrite':
-        return <ToolBodyTodo input={inp} />;
-      case 'Agent':
-        return <ToolBodyAgent input={inp} result={tool.result} />;
-      case 'Bash':
-        return <ToolBodyBash input={inp} result={tool.result} />;
-      case 'Edit':
-        return <ToolBodyEdit input={inp} />;
-      case 'Read':
-        return <ToolBodyReadWrite input={inp} result={tool.result} />;
-      case 'Write':
-        return <ToolBodyReadWrite input={inp} result={tool.result} isWrite />;
-      case 'Grep':
-      case 'Glob':
-        return <ToolBodySearch input={inp} result={tool.result} />;
-      default:
-        return <ToolBodyDefault result={tool.result} />;
-    }
+    const bodyContent = (() => {
+      switch (tool.name) {
+        case 'TodoWrite':
+          return <ToolBodyTodo input={inp} />;
+        case 'Agent':
+          return <ToolBodyAgent input={inp} result={tool.result} />;
+        case 'Bash':
+          return <ToolBodyBash input={inp} result={tool.result} />;
+        case 'Edit':
+          return <ToolBodyEdit input={inp} />;
+        case 'Read':
+          return <ToolBodyReadWrite input={inp} result={tool.result} />;
+        case 'Write':
+          return <ToolBodyReadWrite input={inp} result={tool.result} isWrite />;
+        case 'Grep':
+        case 'Glob':
+          return <ToolBodySearch input={inp} result={tool.result} />;
+        default:
+          return <ToolBodyDefault result={tool.result} />;
+      }
+    })();
+
+    return (
+      <>
+        {bodyContent}
+        {/* Render subagent nested children */}
+        {hasChildren && (
+          <div className="chat-subagent-children">
+            {tool.children!.map((child, ci) => {
+              if (child.kind === 'text') {
+                return (
+                  <div key={ci} className="chat-subagent-text">
+                    {renderMarkdown(child.text)}
+                  </div>
+                );
+              }
+              if (child.kind === 'thinking') {
+                return <ThinkingBlock key={ci} text={child.text} />;
+              }
+              if (child.kind === 'tool') {
+                return (
+                  <div key={ci} className="chat-tool-calls">
+                    <ToolCallBlock
+                      tool={child}
+                      isJobRunning={isJobRunning}
+                      isLastInGroup={ci === tool.children!.length - 1 && isLastInGroup}
+                      depth={depth + 1}
+                    />
+                  </div>
+                );
+              }
+              return null;
+            })}
+          </div>
+        )}
+      </>
+    );
   };
 
   return (
-    <div className={`chat-tool-block ${isActive ? 'active' : ''}`}>
+    <div
+      className={`chat-tool-block ${isActive ? 'active' : ''} ${depth > 0 ? 'chat-tool-nested' : ''}`}
+      style={{ borderLeftColor: borderColor }}
+    >
       <div className="chat-tool-header" onClick={() => setExpanded(!expanded)}>
         <span className="chat-tool-chevron">
           {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
@@ -495,8 +713,13 @@ function ToolCallBlock({ tool, isJobRunning, isLastInGroup }: { tool: { name: st
         {icon}
         <span className="chat-tool-name">{tool.name}</span>
         {summary && <span className="chat-tool-summary">{summary}</span>}
+        {hasChildren && !expanded && <span className="chat-subagent-badge">{tool.children!.filter(c => c.kind === 'tool').length} steps</span>}
         {isActive && <span className="chat-tool-spinner" />}
-        {!isActive && tool.result !== undefined && <span className="chat-tool-done">done</span>}
+        {!isActive && tool.result !== undefined && (
+          <span className={`chat-tool-done ${tool.isError ? 'chat-tool-done-error' : ''}`}>
+            {tool.isError ? 'error' : 'done'}
+          </span>
+        )}
       </div>
       {expanded && (
         <div className="chat-tool-body">
@@ -530,9 +753,9 @@ function OutputLogLine({ log }: { log: LogEntry }) {
           <span className="log-tool-label">{toolName}</span>
           {summary && <span className="log-tool-summary">{summary}</span>}
         </span>
-        {expanded && log.meta?.input && (
+        {expanded && log.meta?.input != null && (
           <pre className="log-expanded-content" onClick={e => e.stopPropagation()}>
-            {typeof log.meta.input === 'string' ? log.meta.input : JSON.stringify(log.meta.input, null, 2)}
+            {String(typeof log.meta.input === 'string' ? log.meta.input : JSON.stringify(log.meta.input, null, 2))}
           </pre>
         )}
       </div>
@@ -630,6 +853,45 @@ function MemoryFilesSection({ section, badgeClass }: { section: any; badgeClass:
   );
 }
 
+// ── Sidebar group for multi-file memory sections ────────────────
+function MemorySidebarGroup({ section, badgeClass, selectedMemory, onSelect }: {
+  section: any; badgeClass: string; selectedMemory: string | null;
+  onSelect: (path: string) => void;
+}) {
+  const [expanded, setExpanded] = useState(true);
+  const files = section.files as { name: string; path: string; content: string }[] ?? [];
+
+  return (
+    <div className="memory-sidebar-group">
+      <div
+        className="memory-sidebar-group-header"
+        onClick={() => setExpanded(!expanded)}
+      >
+        <span className="chat-tool-chevron">
+          {expanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+        </span>
+        <span className={`memory-badge ${badgeClass}`}>{section.label}</span>
+        <span className="memory-explorer-item-count">{files.length}</span>
+      </div>
+      {expanded && files.map(f => {
+        const shortName = f.path.startsWith(section.path)
+          ? f.path.slice(section.path.length).replace(/^\//, '')
+          : f.name;
+        return (
+          <div
+            key={f.path}
+            className={`memory-explorer-item memory-explorer-subitem ${selectedMemory === f.path ? 'memory-explorer-item-active' : ''}`}
+            onClick={() => onSelect(f.path)}
+          >
+            <FileText size={11} />
+            <span className="memory-explorer-item-path">{shortName}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 // ── Collapsible long text block ────────────────────────────────
 function CollapsibleUserText({ text }: { text: string }) {
   const [expanded, setExpanded] = useState(false);
@@ -664,6 +926,7 @@ export function JobDetail({ job, logs, projectId, onNewJob }: Props) {
   const fileSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [followUp, setFollowUp] = useState('');
   const [memorySections, setMemorySections] = useState<any[] | null>(null);
+  const [selectedMemory, setSelectedMemory] = useState<string | null>(null);
   const [editingMemory, setEditingMemory] = useState<{ filePath: string; content: string } | null>(null);
   const [memorySaving, setMemorySaving] = useState(false);
   const [cronTasks, setCronTasks] = useState<any[]>([]);
@@ -724,12 +987,50 @@ export function JobDetail({ job, logs, projectId, onNewJob }: Props) {
     return cmds;
   }, [job.id, job.status, onNewJob]);
 
+  // Fetch SDK slash commands from active session (with retry for race condition)
+  const [sdkCommands, setSdkCommands] = useState<SDKSlashCommand[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+
+    if (job.status === 'running' || job.status === 'idle') {
+      const fetchCommands = (attempt: number) => {
+        api.getCommands(job.id)
+          .then(cmds => {
+            if (cancelled) return;
+            if (cmds && cmds.length > 0) {
+              setSdkCommands(cmds);
+            } else if (attempt < 3) {
+              // Server may not have queryHandle ready yet — retry after delay
+              retryTimer = setTimeout(() => fetchCommands(attempt + 1), 1500 * attempt);
+            }
+          })
+          .catch(() => { if (!cancelled) setSdkCommands([]); });
+      };
+      fetchCommands(1);
+    } else {
+      setSdkCommands([]);
+    }
+
+    return () => {
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+    };
+  }, [job.id, job.status]);
+
+  const handleSdkCommand = useCallback((fullCommand: string) => {
+    // Send the slash command as a message to the session
+    api.continueJob(job.id, fullCommand).catch(console.error);
+  }, [job.id]);
+
   const suggestions = useSuggestions({
     inputRef,
     value: followUp,
     setValue: setFollowUp,
     projectId,
     commands: suggestionCommands,
+    sdkCommands,
+    onSdkCommand: handleSdkCommand,
     enabled: true,
   });
 
@@ -784,7 +1085,13 @@ export function JobDetail({ job, logs, projectId, onNewJob }: Props) {
       refreshGitStatus();
     } else if (tab === 'memories') {
       setEditingMemory(null);
-      api.getMemories(projectId).then((d: any) => setMemorySections(d.sections ?? [])).catch(() => setMemorySections([]));
+      setSelectedMemory(null);
+      api.getMemories(projectId).then((d: any) => {
+        const sections = d.sections ?? [];
+        setMemorySections(sections);
+        // Auto-select the first section
+        if (sections.length > 0) setSelectedMemory(sections[0].path);
+      }).catch(() => setMemorySections([]));
     } else if (tab === 'cron') {
       api.getCron(projectId, job.id).then((data: any) => {
         setCronTasks(data.tasks ?? []);
@@ -1014,6 +1321,9 @@ export function JobDetail({ job, logs, projectId, onNewJob }: Props) {
                             {renderMarkdown(part.text)}
                           </div>
                         );
+                      }
+                      if (part.kind === 'thinking') {
+                        return <ThinkingBlock key={j} text={part.text} />;
                       }
                       const currentToolIdx = toolCounter++;
                       return (
@@ -1467,74 +1777,146 @@ export function JobDetail({ job, logs, projectId, onNewJob }: Props) {
           </div>
         )}
 
-        {/* ── Memories tab ── */}
+        {/* ── Memories tab (two-column layout like files) ── */}
         {tab === 'memories' && (
-          <div className="memories-container">
-            {memorySections === null ? (
-              <div className="text-sm text-muted" style={{ fontStyle: 'italic' }}>Loading...</div>
-            ) : memorySections.length === 0 ? (
-              <div className="text-sm text-muted" style={{ fontStyle: 'italic', textAlign: 'center', padding: 40 }}>
-                No memory files found.
+          <div className="memory-explorer" style={{ height: '100%' }}>
+            {/* Left panel: section list */}
+            <div className="memory-explorer-sidebar">
+              <div className="memory-explorer-header">
+                <BookOpen size={13} />
+                <span>Memory Files</span>
               </div>
-            ) : (
-              memorySections.map((sec: any) => {
-                const isEditing = editingMemory?.filePath === sec.path;
+              <div className="memory-explorer-list">
+                {memorySections === null ? (
+                  <div className="memory-explorer-empty">Loading...</div>
+                ) : memorySections.length === 0 ? (
+                  <div className="memory-explorer-empty">No memory files found.</div>
+                ) : (
+                  memorySections.map((sec: any) => {
+                    const badgeClass = sec.level.startsWith('user') ? 'memory-badge-user'
+                      : sec.level === 'auto-memory' ? 'memory-badge-auto'
+                      : sec.level === 'local' ? 'memory-badge-local'
+                      : 'memory-badge-project';
+                    const isMultiFile = sec.files && sec.files.length > 0;
+                    const isSelected = selectedMemory === sec.path;
+
+                    if (isMultiFile) {
+                      // Multi-file sections expand to show individual files
+                      return (
+                        <MemorySidebarGroup
+                          key={sec.path}
+                          section={sec}
+                          badgeClass={badgeClass}
+                          selectedMemory={selectedMemory}
+                          onSelect={(path: string) => { setSelectedMemory(path); setEditingMemory(null); }}
+                        />
+                      );
+                    }
+
+                    return (
+                      <div
+                        key={sec.path}
+                        className={`memory-explorer-item ${isSelected ? 'memory-explorer-item-active' : ''}`}
+                        onClick={() => { setSelectedMemory(sec.path); setEditingMemory(null); }}
+                      >
+                        <span className={`memory-badge ${badgeClass}`}>{sec.label}</span>
+                        <span className="memory-explorer-item-path" title={sec.path}>
+                          {sec.path.split('/').pop() || sec.path}
+                        </span>
+                        {sec.editable && <Edit3 size={10} className="memory-explorer-item-editable" />}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+
+            {/* Right panel: selected content */}
+            <div className="memory-explorer-content">
+              {(() => {
+                if (!selectedMemory || !memorySections) {
+                  return (
+                    <div className="memory-content-empty">
+                      <BookOpen size={32} style={{ opacity: 0.3 }} />
+                      <div>Select a memory file to view</div>
+                    </div>
+                  );
+                }
+
+                // Find the section + optional sub-file
+                let sec: any = null;
+                let subFile: any = null;
+                for (const s of memorySections) {
+                  if (s.path === selectedMemory) { sec = s; break; }
+                  if (s.files) {
+                    const f = s.files.find((f: any) => f.path === selectedMemory);
+                    if (f) { sec = s; subFile = f; break; }
+                  }
+                }
+                if (!sec) {
+                  return (
+                    <div className="memory-content-empty">
+                      <BookOpen size={32} style={{ opacity: 0.3 }} />
+                      <div>Select a memory file to view</div>
+                    </div>
+                  );
+                }
+
                 const badgeClass = sec.level.startsWith('user') ? 'memory-badge-user'
                   : sec.level === 'auto-memory' ? 'memory-badge-auto'
                   : sec.level === 'local' ? 'memory-badge-local'
                   : 'memory-badge-project';
 
-                // Single-file section (CLAUDE.md)
-                if (sec.content !== null || (!sec.files && sec.editable)) {
-                  return (
-                    <div key={sec.path} className="memory-section">
-                      <div className="memory-header">
-                        <div className="memory-level">
-                          <span className={`memory-badge ${badgeClass}`}>{sec.label}</span>
-                          <span className="memory-path">{sec.path}</span>
-                        </div>
-                        {sec.editable && !isEditing && (
-                          <button className="btn btn-sm" onClick={() => setEditingMemory({ filePath: sec.path, content: sec.content ?? '' })}>
+                const filePath = subFile ? subFile.path : sec.path;
+                const content = subFile ? subFile.content : sec.content;
+                const editable = subFile ? false : sec.editable;
+                const isEditing = editingMemory?.filePath === filePath;
+
+                return (
+                  <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+                    <div className="memory-content-header">
+                      <div className="memory-content-header-left">
+                        <span className={`memory-badge ${badgeClass}`}>{sec.label}</span>
+                        <span className="memory-content-path">{filePath}</span>
+                      </div>
+                      <div className="memory-content-header-actions">
+                        {editable && !isEditing && (
+                          <button className="btn btn-sm" onClick={() => setEditingMemory({ filePath, content: content ?? '' })}>
                             <Edit3 size={11} /> Edit
                           </button>
                         )}
                         {isEditing && (
-                          <div className="flex gap-2">
+                          <>
                             <button className="btn btn-primary btn-sm" onClick={handleSaveMemory} disabled={memorySaving}>
                               <Save size={11} /> {memorySaving ? 'Saving...' : 'Save'}
                             </button>
                             <button className="btn btn-sm" onClick={() => setEditingMemory(null)}>
                               <X size={11} /> Cancel
                             </button>
-                          </div>
+                          </>
                         )}
                       </div>
-                      {isEditing ? (
-                        <textarea
-                          className="memory-editor"
-                          value={editingMemory.content}
-                          onChange={e => setEditingMemory({ ...editingMemory, content: e.target.value })}
-                          spellCheck={false}
-                        />
-                      ) : (
-                        <div className="memory-content">
-                          {sec.content ? renderMarkdown(sec.content) : (
-                            <span className="text-muted" style={{ fontStyle: 'italic' }}>
-                              No file found. {sec.editable ? 'Click Edit to create one.' : ''}
-                            </span>
-                          )}
-                        </div>
-                      )}
                     </div>
-                  );
-                }
-
-                // Multi-file section (rules/, auto-memory/)
-                return (
-                  <MemoryFilesSection key={sec.path} section={sec} badgeClass={badgeClass} />
+                    {isEditing ? (
+                      <textarea
+                        className="memory-editor-panel"
+                        value={editingMemory!.content}
+                        onChange={e => setEditingMemory({ ...editingMemory!, content: e.target.value })}
+                        spellCheck={false}
+                      />
+                    ) : (
+                      <div className="memory-content-body">
+                        {content ? renderMarkdown(content) : (
+                          <span className="text-muted" style={{ fontStyle: 'italic' }}>
+                            No file found. {editable ? 'Click Edit to create one.' : ''}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 );
-              })
-            )}
+              })()}
+            </div>
           </div>
         )}
 

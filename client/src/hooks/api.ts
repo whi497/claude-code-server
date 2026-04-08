@@ -56,6 +56,9 @@ export const api = {
   },
   gitAction: (projectId: string, action: string, payload?: { files?: string[]; message?: string }) =>
     request(`/projects/${projectId}/git/action`, { method: 'POST', body: JSON.stringify({ action, ...payload }) }),
+  // Slash commands (from SDK session)
+  getCommands: (jobId: string): Promise<{ name: string; description: string; argumentHint: string }[]> =>
+    request(`/jobs/${jobId}/commands`),
   // Search
   searchJobs: (query: string, limit?: number) => {
     const params = new URLSearchParams({ q: query });

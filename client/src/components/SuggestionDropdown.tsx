@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { File, Folder, Slash } from 'lucide-react';
+import { File, Folder, Slash, Terminal } from 'lucide-react';
 import type { SuggestionItem } from '../hooks/useSuggestions';
 
 interface Props {
@@ -20,6 +20,8 @@ function ItemIcon({ icon }: { icon: SuggestionItem['icon'] }) {
       return <Folder size={13} />;
     case 'command':
       return <Slash size={13} />;
+    case 'sdk-command':
+      return <Terminal size={13} />;
     default:
       return null;
   }
@@ -45,6 +47,11 @@ export function SuggestionDropdown({ items, selectedIndex, onSelect, onHover, po
     }
   };
 
+  // Detect boundaries between item types for separators
+  const hasLocal = items.some(i => i.type === 'command');
+  const hasSdk = items.some(i => i.type === 'sdk-command');
+  const showSeparator = hasLocal && hasSdk;
+
   return (
     <div className={`suggestion-dropdown ${position}`}>
       <div className="suggestion-list" ref={listRef}>
@@ -56,26 +63,36 @@ export function SuggestionDropdown({ items, selectedIndex, onSelect, onHover, po
             {triggerType === '@' ? 'No files found' : 'No commands available'}
           </div>
         )}
-        {items.map((item, i) => (
-          <div
-            key={item.id}
-            ref={setItemRef(i)}
-            className={`suggestion-item ${i === selectedIndex ? 'selected' : ''}`}
-            onMouseDown={e => {
-              e.preventDefault(); // prevent input blur
-              onSelect(i);
-            }}
-            onMouseEnter={() => onHover(i)}
-          >
-            <span className="suggestion-item-icon">
-              <ItemIcon icon={item.icon} />
-            </span>
-            <span className="suggestion-item-label">{item.label}</span>
-            {item.description && (
-              <span className="suggestion-item-desc">{item.description}</span>
-            )}
-          </div>
-        ))}
+        {items.map((item, i) => {
+          // Show separator before the first SDK command (when local commands exist above)
+          const prevItem = i > 0 ? items[i - 1] : null;
+          const needsSeparator = showSeparator && item.type === 'sdk-command' && prevItem?.type === 'command';
+
+          return (
+            <div key={item.id}>
+              {needsSeparator && (
+                <div className="suggestion-separator">Claude Code</div>
+              )}
+              <div
+                ref={setItemRef(i)}
+                className={`suggestion-item ${i === selectedIndex ? 'selected' : ''}`}
+                onMouseDown={e => {
+                  e.preventDefault(); // prevent input blur
+                  onSelect(i);
+                }}
+                onMouseEnter={() => onHover(i)}
+              >
+                <span className="suggestion-item-icon">
+                  <ItemIcon icon={item.icon} />
+                </span>
+                <span className="suggestion-item-label">{item.label}</span>
+                {item.description && (
+                  <span className="suggestion-item-desc">{item.description}</span>
+                )}
+              </div>
+            </div>
+          );
+        })}
       </div>
       <div className="suggestion-hint">
         <span><kbd>&uarr;</kbd><kbd>&darr;</kbd> Navigate</span>

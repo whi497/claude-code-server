@@ -1107,10 +1107,11 @@ body {
   padding: 20px 24px;
 }
 
-/* When chat/output/git tab is active, detail-body becomes flex to stretch wrapper */
+/* When chat/output/git/memory tab is active, detail-body becomes flex to stretch wrapper */
 .detail-body:has(.chat-tab-wrapper),
 .detail-body:has(.output-tab-wrapper),
-.detail-body:has(.git-panel) {
+.detail-body:has(.git-panel),
+.detail-body:has(.memory-explorer) {
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -1249,8 +1250,20 @@ body {
   margin-top: 10px;
 }
 
+/* ── Tool border color variables ─────────────────────────── */
+:root {
+  --tool-border-green: #22c55e;
+  --tool-border-amber: #f59e0b;
+  --tool-border-gray: #6b7280;
+  --tool-border-blue: #3b82f6;
+  --tool-border-indigo: #6366f1;
+  --tool-border-violet: #8b5cf6;
+  --tool-border-purple: #a855f7;
+}
+
 .chat-tool-block {
   border: 1px solid var(--border);
+  border-left: 3px solid var(--tool-border-gray);
   border-radius: var(--radius-sm);
   overflow: hidden;
   background: var(--bg-primary);
@@ -1258,7 +1271,15 @@ body {
 
 .chat-tool-block.active {
   border-color: var(--info);
+  border-left-width: 3px;
   box-shadow: 0 0 8px rgba(96, 165, 250, 0.1);
+}
+
+/* Nested subagent tool blocks */
+.chat-tool-block.chat-tool-nested {
+  margin-left: 0;
+  border-left-width: 2px;
+  opacity: 0.95;
 }
 
 .chat-tool-header {
@@ -1319,6 +1340,88 @@ body {
 
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+/* ── Tool done/error badges ──────────────────────────────── */
+.chat-tool-done-error {
+  color: var(--danger) !important;
+}
+
+/* ── Subagent badge (step count) ─────────────────────────── */
+.chat-subagent-badge {
+  font-size: 10px;
+  color: var(--text-muted);
+  background: var(--bg-tertiary);
+  padding: 1px 6px;
+  border-radius: 8px;
+  margin-left: 4px;
+}
+
+/* ── Subagent nested children ────────────────────────────── */
+.chat-subagent-children {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.chat-subagent-text {
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding: 4px 8px;
+  line-height: 1.5;
+}
+
+/* ── Thinking block ──────────────────────────────────────── */
+.chat-thinking-block {
+  margin: 6px 0;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--text-muted);
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+  cursor: pointer;
+}
+
+.chat-thinking-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.chat-thinking-label {
+  font-weight: 500;
+  font-style: italic;
+}
+
+.chat-thinking-preview {
+  font-size: 11px;
+  color: var(--text-muted);
+  opacity: 0.6;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-thinking-content {
+  padding: 8px 10px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  opacity: 0.8;
+  white-space: pre-wrap;
+  line-height: 1.5;
+  border-top: 1px solid var(--border);
+  max-height: 400px;
+  overflow-y: auto;
 }
 
 .chat-tool-body {
@@ -1693,35 +1796,128 @@ body {
   padding: 4px 6px;
 }
 
-/* ── Memories tab ── */
-.memories-container {
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-}
+/* ── Memories tab (two-column layout) ── */
 
-.memory-section {
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+/* Main container — flex row, mirroring .file-explorer */
+.memory-explorer {
+  display: flex;
+  height: 100%;
   overflow: hidden;
 }
 
-.memory-header {
+/* Left sidebar */
+.memory-explorer-sidebar {
+  width: 280px;
+  min-width: 220px;
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.memory-explorer-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 8px;
   padding: 10px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border);
   background: var(--bg-secondary);
+  flex-shrink: 0;
+}
+
+.memory-explorer-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.memory-explorer-empty {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-style: italic;
+  padding: 20px 14px;
+  text-align: center;
+}
+
+/* Individual item in the sidebar */
+.memory-explorer-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: background 0.1s;
+  border-left: 2px solid transparent;
+}
+
+.memory-explorer-item:hover {
+  background: var(--bg-tertiary);
+}
+
+.memory-explorer-item-active {
+  background: var(--bg-tertiary);
+  border-left-color: var(--accent);
+}
+
+.memory-explorer-item-path {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
+}
+
+.memory-explorer-item-editable {
+  color: var(--text-muted);
+  flex-shrink: 0;
+  opacity: 0.5;
+}
+
+.memory-explorer-subitem {
+  padding-left: 30px;
+}
+
+/* Sidebar group (multi-file sections like rules/, auto-memory/) */
+.memory-sidebar-group {
   border-bottom: 1px solid var(--border);
 }
 
-.memory-level {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
+.memory-sidebar-group:last-child {
+  border-bottom: none;
 }
 
+.memory-sidebar-group-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: background 0.1s;
+}
+
+.memory-sidebar-group-header:hover {
+  background: var(--bg-tertiary);
+}
+
+.memory-explorer-item-count {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  margin-left: auto;
+  background: var(--bg-tertiary);
+  padding: 1px 6px;
+  border-radius: 8px;
+}
+
+/* Shared badge styles */
 .memory-badge {
   font-size: 10px;
   font-weight: 600;
@@ -1743,24 +1939,6 @@ body {
   color: var(--accent);
 }
 
-.memory-path {
-  font-size: 11px;
-  font-family: var(--font-mono);
-  color: var(--text-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
-}
-
-.memory-content {
-  padding: 16px;
-  font-size: 13px;
-  line-height: 1.7;
-  max-height: 50vh;
-  overflow-y: auto;
-}
-
 .memory-badge-local {
   background: var(--warning-dim);
   color: var(--warning);
@@ -1771,17 +1949,73 @@ body {
   color: var(--info);
 }
 
-.memory-file-count {
-  font-size: 10px;
-  font-family: var(--font-mono);
-  color: var(--text-muted);
-  margin-left: auto;
+/* Right content panel */
+.memory-explorer-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
-.memory-editor {
+.memory-content-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.memory-content-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-secondary);
+  flex-shrink: 0;
+  gap: 12px;
+}
+
+.memory-content-header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+}
+
+.memory-content-path {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.memory-content-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.memory-content-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 20px;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.memory-editor-panel {
+  flex: 1;
   width: 100%;
-  min-height: 300px;
-  padding: 16px;
+  padding: 16px 20px;
   font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.6;
@@ -1789,47 +2023,8 @@ body {
   color: var(--text-primary);
   border: none;
   outline: none;
-  resize: vertical;
-}
-
-/* Multi-file memory sections (rules, auto-memory) */
-.memory-files-list {
-  display: flex;
-  flex-direction: column;
-}
-
-.memory-file-item {
-  border-bottom: 1px solid var(--border);
-}
-
-.memory-file-item:last-child {
-  border-bottom: none;
-}
-
-.memory-file-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 12px;
-  font-size: 12px;
-  font-family: var(--font-mono);
-  color: var(--text-secondary);
-  cursor: pointer;
-  transition: background 0.1s;
-}
-
-.memory-file-header:hover {
-  background: var(--bg-tertiary);
-}
-
-.memory-file-name {
-  color: var(--text-secondary);
-}
-
-.memory-file-content {
-  border-top: 1px solid var(--border);
-  padding: 12px 16px;
-  max-height: 40vh;
+  resize: none;
+  overflow-y: auto;
 }
 
 /* ── Cron tab ── */
@@ -3366,4 +3561,23 @@ kbd {
   font-family: var(--font-sans);
   font-size: 12px;
   font-style: italic;
+}
+
+.suggestion-separator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px 2px;
+  font-family: var(--font-sans);
+  font-size: 10px;
+  color: var(--text-muted);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
+.suggestion-separator::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
 }

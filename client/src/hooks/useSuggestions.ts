@@ -7,8 +7,8 @@ export interface SuggestionItem {
   id: string;
   label: string;
   description?: string;
-  icon: 'file' | 'folder' | 'command';
-  type: 'file' | 'command';
+  icon: 'file' | 'folder' | 'command' | 'sdk-command';
+  type: 'file' | 'command' | 'sdk-command';
 }
 
 export interface CommandDef {
@@ -19,12 +19,21 @@ export interface CommandDef {
   execute: () => void;
 }
 
+/** SDK SlashCommand from the Claude Agent SDK */
+export interface SDKSlashCommand {
+  name: string;          // e.g. "compact" (without leading /)
+  description: string;
+  argumentHint: string;  // e.g. "<instructions>"
+}
+
 export interface UseSuggestionsOptions {
   inputRef: RefObject<HTMLInputElement | HTMLTextAreaElement | null>;
   value: string;
   setValue: (v: string) => void;
   projectId: string;
   commands?: CommandDef[];
+  sdkCommands?: SDKSlashCommand[];       // from SDK session
+  onSdkCommand?: (fullCommand: string) => void;  // called with e.g. "/compact summary" to send as message
   enabled?: boolean;
 }
 
@@ -116,7 +125,7 @@ function flattenFileTree(nodes: FileNode[], maxItems = 50): SuggestionItem[] {
 // ── Main hook ────────────────────────────────────────────────
 
 export function useSuggestions(options: UseSuggestionsOptions): UseSuggestionsReturn {
-  const { inputRef, value, setValue, projectId, commands = [], enabled = true } = options;
+  const { inputRef, value, setValue, projectId, commands = [], sdkCommands = [], onSdkCommand, enabled = true } = options;
 
   const [isOpen, setIsOpen] = useState(false);
   const [items, setItems] = useState<SuggestionItem[]>([]);
@@ -129,16 +138,38 @@ export function useSuggestions(options: UseSuggestionsOptions): UseSuggestionsRe
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const triggerRef = useRef<TriggerInfo | null>(null);
 
-  // Available commands (filtered by availability)
+  // Available commands: local (execute JS) + SDK (sent as message to session)
   const availableCommands = useMemo(() => {
-    return commands.filter(c => c.available()).map(c => ({
+    const localItems: SuggestionItem[] = commands.filter(c => c.available()).map(c => ({
       id: c.id,
       label: c.label,
       description: c.description,
       icon: 'command' as const,
       type: 'command' as const,
     }));
-  }, [commands]);
+
+    // SDK commands — filtered to exclude ones that don't make sense headlessly
+    const SKIP_SDK_COMMANDS = new Set([
+      'login', 'logout', 'voice', 'theme', 'color', 'keybindings',
+      'vim', 'terminal-setup', 'ide', 'chrome', 'web-setup',
+      'install-github-app', 'install-slack-app', 'stickers',
+      'feedback', 'copy', 'powerup', 'think-back', 'teleport',
+      'upgrade', 'extra-usage', 'rate-limit-options', 'remote-env',
+      'remote-control', 'setup-bedrock', 'add-dir', 'resume',
+    ]);
+    const localIds = new Set(commands.map(c => c.id));
+    const sdkItems: SuggestionItem[] = sdkCommands
+      .filter(c => !SKIP_SDK_COMMANDS.has(c.name) && !localIds.has(c.name))
+      .map(c => ({
+        id: `sdk:${c.name}`,
+        label: `/${c.name}`,
+        description: c.description + (c.argumentHint ? ` ${c.argumentHint}` : ''),
+        icon: 'sdk-command' as const,
+        type: 'sdk-command' as const,
+      }));
+
+    return [...localItems, ...sdkItems];
+  }, [commands, sdkCommands]);
 
   // Dismiss the dropdown
   const dismiss = useCallback(() => {
@@ -233,7 +264,7 @@ export function useSuggestions(options: UseSuggestionsOptions): UseSuggestionsRe
     } else {
       const lq = query.toLowerCase();
       setItems(availableCommands.filter(c =>
-        c.label.toLowerCase().includes(lq) || c.description.toLowerCase().includes(lq)
+        c.label.toLowerCase().includes(lq) || (c.description ?? '').toLowerCase().includes(lq)
       ));
     }
     setLoading(false);
@@ -304,16 +335,43 @@ export function useSuggestions(options: UseSuggestionsOptions): UseSuggestionsRe
         }
       });
     } else if (item.type === 'command') {
-      // Execute the command, clear input
+      // Execute local command, clear input
       const cmd = commands.find(c => c.id === item.id);
       if (cmd) {
         setValue('');
         cmd.execute();
       }
+    } else if (item.type === 'sdk-command') {
+      // SDK slash command — send as message to the session
+      // The label is e.g. "/compact", which the SDK CLI processes directly
+      if (onSdkCommand) {
+        // Check if the command takes arguments (has argumentHint)
+        const sdkCmd = sdkCommands.find(c => `sdk:${c.name}` === item.id);
+        if (sdkCmd?.argumentHint) {
+          // Replace the typed text with the full command, let user type args
+          const before = value.slice(0, trigger.startPos);
+          const after = value.slice(trigger.startPos + 1 + trigger.query.length);
+          const insertion = `${item.label} `;
+          const newValue = before + insertion + after;
+          setValue(newValue);
+          const newCursorPos = before.length + insertion.length;
+          requestAnimationFrame(() => {
+            const el = inputRef.current;
+            if (el) {
+              el.setSelectionRange(newCursorPos, newCursorPos);
+              el.focus();
+            }
+          });
+        } else {
+          // No args needed — execute immediately
+          setValue('');
+          onSdkCommand(item.label); // e.g. "/compact"
+        }
+      }
     }
 
     dismiss();
-  }, [items, value, setValue, dismiss, commands, inputRef]);
+  }, [items, value, setValue, dismiss, commands, sdkCommands, onSdkCommand, inputRef]);
 
   // Keyboard handler
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {

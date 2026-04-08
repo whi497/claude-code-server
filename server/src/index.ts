@@ -29,6 +29,8 @@ let jobs: Job[] = [];
 const activeQueries = new Map<string, {
   abort: AbortController;
   channel?: { push: (msg: any) => void; close: () => void };
+  queryHandle?: any;  // Query object for supportedCommands() etc.
+  cachedCommands?: { name: string; description: string; argumentHint: string }[];
 }>();
 
 // ── Approval state (ephemeral — not persisted) ──────────────────
@@ -343,7 +345,8 @@ async function runJob(job: Job) {
 
   const abortController = new AbortController();
   const channel = createMessageChannel();
-  activeQueries.set(job.id, { abort: abortController, channel });
+  const session: { abort: AbortController; channel?: any; queryHandle?: any; cachedCommands?: any[] } = { abort: abortController, channel };
+  activeQueries.set(job.id, session);
 
   const addLog = (entry: Omit<LogEntry, 'timestamp'>) => {
     const log: LogEntry = { ...entry, timestamp: new Date().toISOString() };
@@ -386,13 +389,30 @@ async function runJob(job: Job) {
     });
 
     // Process messages — loop stays alive until generator is closed or aborted
-    for await (const message of query({ prompt: channel.generator, options: opts })) {
+    const queryHandle = query({ prompt: channel.generator, options: opts });
+    session.queryHandle = queryHandle;
+    for await (const message of queryHandle) {
       const msg = message as any;
 
-      // Capture session ID from init
+      // Capture session ID from init + cache slash commands
       if (msg.type === 'system' && msg.subtype === 'init') {
         job.sessionId = msg.session_id;
         addLog({ type: 'system', content: `Session: ${msg.session_id} | Model: ${msg.model}` });
+
+        // Proactively fetch full command list from SDK and cache it
+        if (session.queryHandle?.supportedCommands) {
+          session.queryHandle.supportedCommands()
+            .then((cmds: any[]) => { session.cachedCommands = cmds; })
+            .catch(() => {});
+        }
+        // Also use init message's slash_commands as immediate fallback
+        if (msg.slash_commands && Array.isArray(msg.slash_commands) && !session.cachedCommands) {
+          session.cachedCommands = msg.slash_commands.map((name: string) => ({
+            name,
+            description: '',
+            argumentHint: '',
+          }));
+        }
       }
 
       // Session state changes (forward-compat with future SDK versions)
@@ -409,16 +429,32 @@ async function runJob(job: Job) {
         }
       }
 
+      // Local slash command output (e.g. /cost, /compact, /clear)
+      if (msg.type === 'system' && msg.subtype === 'local_command_output') {
+        addLog({ type: 'system', content: msg.content });
+      }
+
       // Assistant messages + cron detection
       if (msg.type === 'assistant' && msg.message?.content) {
+        // Detect parent_tool_use_id for subagent messages
+        const parentToolUseId = msg.parent_tool_use_id ?? undefined;
         for (const block of msg.message.content) {
           if (block.type === 'text' && block.text) {
-            addLog({ type: 'text', content: block.text });
+            addLog({ type: 'text', content: block.text, meta: parentToolUseId ? { parent_tool_use_id: parentToolUseId } : undefined });
+          } else if (block.type === 'thinking') {
+            const thinkingText = block.thinking || block.text || '';
+            if (thinkingText) {
+              addLog({ type: 'thinking', content: thinkingText, meta: parentToolUseId ? { parent_tool_use_id: parentToolUseId } : undefined });
+            }
           } else if (block.type === 'tool_use') {
             addLog({
               type: 'tool',
               content: `🔧 ${block.name}`,
-              meta: { input: block.input },
+              meta: {
+                input: block.input,
+                tool_use_id: block.id,
+                parent_tool_use_id: parentToolUseId,
+              },
             });
 
             // Auto-promote job → session when cron/scheduled task detected
@@ -433,12 +469,95 @@ async function runJob(job: Job) {
         }
       }
 
-      // Tool results (user messages with tool results)
-      if (msg.type === 'user' && msg.tool_use_result !== undefined) {
-        const resultStr = extractToolResultContent(msg.tool_use_result);
-        // Extract tool_use_id from the message content (SDK stores it inside message.content[0].tool_use_id)
-        const toolUseId = (msg.message as any)?.content?.[0]?.tool_use_id ?? undefined;
-        addLog({ type: 'tool_result', content: resultStr, meta: { tool_use_id: toolUseId } });
+      // Tool results — user messages carrying tool output back to Claude
+      // The SDK provides results in two places:
+      //   1. msg.tool_use_result (convenience, structured object — may be undefined)
+      //   2. msg.content[] / msg.message.content[] (ToolResultBlock objects — always present)
+      // We iterate over the content blocks to handle ALL results, including
+      // multi-tool parallel calls and cases where tool_use_result is undefined.
+      if (msg.type === 'user') {
+        const parentToolUseId = msg.parent_tool_use_id ?? undefined;
+
+        // Primary path: iterate over SDK content blocks (like claude_web does)
+        const contentBlocks = msg.content ?? (msg.message as any)?.content ?? [];
+        let handledAny = false;
+        if (Array.isArray(contentBlocks)) {
+          for (const block of contentBlocks) {
+            // SDK ToolResultBlock: { type: 'tool_result', tool_use_id, content, is_error }
+            const blockType = block.type ?? (block.constructor?.name === 'ToolResultBlock' ? 'tool_result' : '');
+            if (blockType === 'tool_result') {
+              const toolUseId = block.tool_use_id ?? undefined;
+              const isError = block.is_error ?? false;
+              const rawContent = block.content;
+              const resultStr = typeof rawContent === 'string'
+                ? rawContent.slice(0, 50000)
+                : extractToolResultContent(rawContent);
+              addLog({
+                type: 'tool_result',
+                content: resultStr || '(no output)',
+                meta: {
+                  tool_use_id: toolUseId,
+                  parent_tool_use_id: parentToolUseId,
+                  is_error: isError || undefined,
+                },
+              });
+              handledAny = true;
+            }
+          }
+        }
+
+        // Fallback: if no content blocks found, try the legacy tool_use_result field
+        if (!handledAny && msg.tool_use_result !== undefined) {
+          const resultStr = extractToolResultContent(msg.tool_use_result);
+          const toolUseId = (msg.message as any)?.content?.[0]?.tool_use_id ?? undefined;
+          const isError = (msg.message as any)?.content?.[0]?.is_error ?? false;
+          addLog({
+            type: 'tool_result',
+            content: resultStr,
+            meta: {
+              tool_use_id: toolUseId,
+              parent_tool_use_id: parentToolUseId,
+              is_error: isError || undefined,
+            },
+          });
+        }
+      }
+
+      // Subagent lifecycle events (Agent tool spawns sub-tasks)
+      if (msg.type === 'system' && msg.subtype === 'task_started') {
+        addLog({
+          type: 'system',
+          content: `🤖 Subagent started`,
+          meta: {
+            subagent_task_id: msg.task_id,
+            subagent_status: 'started',
+            parent_tool_use_id: msg.tool_use_id,
+          },
+        });
+      }
+      if (msg.type === 'system' && msg.subtype === 'task_progress') {
+        addLog({
+          type: 'system',
+          content: `🤖 Subagent progress`,
+          meta: {
+            subagent_task_id: msg.task_id,
+            subagent_status: 'progress',
+            parent_tool_use_id: msg.tool_use_id,
+            subagent_usage: msg.usage,
+          },
+        });
+      }
+      if (msg.type === 'system' && msg.subtype === 'task_notification') {
+        addLog({
+          type: 'system',
+          content: `🤖 Subagent ${msg.status === 'completed' ? 'completed' : 'failed'}`,
+          meta: {
+            subagent_task_id: msg.task_id,
+            subagent_status: msg.status === 'completed' ? 'completed' : 'failed',
+            parent_tool_use_id: msg.tool_use_id,
+            subagent_usage: msg.usage,
+          },
+        });
       }
 
       // Turn result — mode-dependent behavior
@@ -766,6 +885,33 @@ app.post('/api/jobs/:id/close-session', (req, res) => {
     session.channel.close();
   }
   res.json(job);
+});
+
+// ── Slash commands (from SDK) ───────────────────────────────────
+app.get('/api/jobs/:id/commands', async (req, res) => {
+  const job = jobs.find(j => j.id === req.params.id);
+  if (!job) return res.status(404).json({ error: 'not found' });
+
+  const session = activeQueries.get(job.id);
+  if (!session) return res.json([]);
+
+  // Try live SDK call first (has full descriptions)
+  if (session.queryHandle?.supportedCommands) {
+    try {
+      const cmds = await session.queryHandle.supportedCommands();
+      session.cachedCommands = cmds; // update cache
+      return res.json(cmds);
+    } catch {
+      // fall through to cache
+    }
+  }
+
+  // Fallback to cached commands (from init message or earlier successful fetch)
+  if (session.cachedCommands?.length) {
+    return res.json(session.cachedCommands);
+  }
+
+  res.json([]);
 });
 
 // ── Approvals API ───────────────────────────────────────────────
