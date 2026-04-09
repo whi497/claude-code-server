@@ -1,16 +1,22 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { api } from '../hooks/api';
-import { useSuggestions, type CommandDef, type SDKSlashCommand } from '../hooks/useSuggestions';
+import { useSuggestions, type CommandDef, type SDKSlashCommand, FALLBACK_SDK_COMMANDS } from '../hooks/useSuggestions';
+import { useAttachments } from '../hooks/useAttachments';
 import { SuggestionDropdown } from './SuggestionDropdown';
-import type { Job, LogEntry } from '../types';
-import { Square, Archive, Play, FolderTree, ScrollText, MessageSquare, ChevronDown, ChevronRight, Wrench, Terminal, FileText, Search, Edit3, PenTool, Globe, Bot, FileCode, Copy, BookOpen, Clock, Save, X, Folder, FolderOpen, File, RefreshCw, GitBranch, Plus, Upload, Download, Check, Undo2, Star } from 'lucide-react';
+import { AttachmentPreview } from './AttachmentPreview';
+import { AttachmentBadge } from './AttachmentPreview';
+import type { Job, LogEntry, ThinkingConfig, EffortLevel } from '../types';
+import { Square, Archive, Play, FolderTree, ScrollText, MessageSquare, ChevronDown, ChevronRight, Wrench, Terminal, FileText, Search, Edit3, PenTool, Globe, Bot, FileCode, Copy, BookOpen, Clock, Save, X, Folder, FolderOpen, File, RefreshCw, GitBranch, Plus, Upload, Download, Check, Undo2, Star, Maximize2, ListPlus, Brain, Paperclip } from 'lucide-react';
 import { renderInline, isTableRow, isTableSeparator, renderTable, renderMarkdown } from './Markdown';
+import { TerminalPane } from './TerminalPane';
 
 interface Props {
   job: Job;
   logs: LogEntry[];
   projectId: string;
   onNewJob?: () => void;
+  onSelectJob?: (jobId: string) => void;
+  allJobs?: Job[];  // for resolving forked-from job names
 }
 
 function formatTime(iso: string) {
@@ -70,11 +76,14 @@ interface ChatMessage {
   timestamp: string;
   isResult?: boolean;
   isError?: boolean;
+  turnIndex: number;          // 0-based index in the chat timeline (for fork targeting)
+  attachments?: Array<{ filename: string; mediaType: string; size: number }>;  // user message attachments metadata
 }
 
 function groupLogsIntoChatMessages(logs: LogEntry[], isRunning: boolean): ChatMessage[] {
   const messages: ChatMessage[] = [];
   let current: ChatMessage | null = null;
+  let nextTurnIndex = 0;
 
   // Build a map of tool_use_id → tool ChatPart for ID-based result matching
   const toolPartById = new Map<string, ChatPart & { kind: 'tool' }>();
@@ -82,7 +91,10 @@ function groupLogsIntoChatMessages(logs: LogEntry[], isRunning: boolean): ChatMe
   const orphans: { parentId: string; part: ChatPart; msgIdx: number; partIdx: number }[] = [];
 
   const flush = () => {
-    if (current) messages.push(current);
+    if (current) {
+      current.turnIndex = nextTurnIndex++;
+      messages.push(current);
+    }
     current = null;
   };
 
@@ -101,7 +113,8 @@ function groupLogsIntoChatMessages(logs: LogEntry[], isRunning: boolean): ChatMe
 
     if (log.type === 'user') {
       flush();
-      current = { role: 'user', parts: [{ kind: 'text', text: log.content }], timestamp: log.timestamp };
+      const userAttachments = (log.meta?.attachments as Array<{ filename: string; mediaType: string; size: number }>) ?? undefined;
+      current = { role: 'user', parts: [{ kind: 'text', text: log.content }], timestamp: log.timestamp, turnIndex: 0, ...(userAttachments ? { attachments: userAttachments } : {}) };
       flush();
       continue;
     }
@@ -109,7 +122,7 @@ function groupLogsIntoChatMessages(logs: LogEntry[], isRunning: boolean): ChatMe
     if (log.type === 'thinking') {
       if (!current || current.role !== 'assistant' || current.isResult) {
         flush();
-        current = { role: 'assistant', parts: [], timestamp: log.timestamp };
+        current = { role: 'assistant', parts: [], timestamp: log.timestamp, turnIndex: 0 };
       }
       // Merge consecutive thinking parts
       const lastPart = current.parts[current.parts.length - 1];
@@ -139,7 +152,7 @@ function groupLogsIntoChatMessages(logs: LogEntry[], isRunning: boolean): ChatMe
       }
       if (!current || current.role !== 'assistant' || current.isResult) {
         flush();
-        current = { role: 'assistant', parts: [], timestamp: log.timestamp };
+        current = { role: 'assistant', parts: [], timestamp: log.timestamp, turnIndex: 0 };
       }
       const textPart: ChatPart = { kind: 'text', text: log.content };
       const lastPart = current.parts[current.parts.length - 1];
@@ -170,7 +183,7 @@ function groupLogsIntoChatMessages(logs: LogEntry[], isRunning: boolean): ChatMe
 
       if (!current || current.role !== 'assistant' || current.isResult) {
         flush();
-        current = { role: 'assistant', parts: [], timestamp: log.timestamp };
+        current = { role: 'assistant', parts: [], timestamp: log.timestamp, turnIndex: 0 };
       }
       const toolPart: ChatPart & { kind: 'tool' } = { kind: 'tool', name: toolName, input: log.meta?.input, id: toolUseId };
       current.parts.push(toolPart);
@@ -205,10 +218,10 @@ function groupLogsIntoChatMessages(logs: LogEntry[], isRunning: boolean): ChatMe
       }
     } else if (log.type === 'result') {
       flush();
-      current = { role: 'assistant', parts: [{ kind: 'text', text: log.content }], timestamp: log.timestamp, isResult: true };
+      current = { role: 'assistant', parts: [{ kind: 'text', text: log.content }], timestamp: log.timestamp, isResult: true, turnIndex: 0 };
     } else if (log.type === 'error') {
       flush();
-      current = { role: 'assistant', parts: [{ kind: 'text', text: log.content }], timestamp: log.timestamp, isError: true };
+      current = { role: 'assistant', parts: [{ kind: 'text', text: log.content }], timestamp: log.timestamp, isError: true, turnIndex: 0 };
     }
   }
   flush();
@@ -345,10 +358,40 @@ function tryParseJSON(raw: string): any {
   return null;
 }
 
+/** Parse SDK content block arrays: [{"type":"text","text":"..."},...]
+ *  Returns { texts, meta } where meta is the last block matching agent metadata pattern */
+function parseContentBlocks(arr: unknown[]): { texts: string[]; meta: string | null } | null {
+  if (!arr.every(item => typeof item === 'object' && item !== null && 'type' in item && 'text' in item
+    && (item as Record<string, unknown>).type === 'text' && typeof (item as Record<string, unknown>).text === 'string')) {
+    return null;
+  }
+  const blocks = arr as { type: string; text: string }[];
+  const texts: string[] = [];
+  let meta: string | null = null;
+  for (const block of blocks) {
+    // Detect agent metadata block (agentId:, total_tokens:, duration_ms:)
+    if (/^agentId:\s/.test(block.text) || /total_tokens:\s/.test(block.text)) {
+      meta = block.text;
+    } else {
+      texts.push(block.text);
+    }
+  }
+  return { texts, meta };
+}
+
 function parseToolResult(raw: string): string {
   const parsed = tryParseJSON(raw);
   if (parsed === null) return raw;
   if (typeof parsed === 'string') return parsed;
+  // SDK content block array: [{"type":"text","text":"..."},...]
+  if (Array.isArray(parsed)) {
+    const blocks = parseContentBlocks(parsed);
+    if (blocks) {
+      return blocks.texts.join('\n\n') || (blocks.meta ?? '(no output)');
+    }
+    // Generic array — pretty print
+    return JSON.stringify(parsed, null, 2);
+  }
   // Bash: { stdout, stderr }
   if (typeof parsed === 'object' && 'stdout' in parsed) {
     const out = (parsed.stdout || '') + (parsed.stderr ? '\n' + parsed.stderr : '');
@@ -406,6 +449,21 @@ function ToolBodyTodo({ input }: { input: Record<string, unknown> }) {
 function ToolBodyAgent({ input, result }: { input: Record<string, unknown>; result?: string }) {
   const prompt = input.prompt as string | undefined;
   const desc = input.description as string | undefined;
+
+  // Parse result: try to extract structured content blocks with separate metadata
+  const resultParsed = useMemo(() => {
+    if (result === undefined) return null;
+    const json = tryParseJSON(result);
+    if (Array.isArray(json)) {
+      const blocks = parseContentBlocks(json);
+      if (blocks) {
+        return { content: blocks.texts.join('\n\n'), meta: blocks.meta };
+      }
+    }
+    // Fallback: use the generic parser
+    return { content: parseToolResult(result), meta: null };
+  }, [result]);
+
   return (
     <div className="tool-agent-body">
       {desc && <div className="tool-agent-desc">{desc}</div>}
@@ -415,10 +473,13 @@ function ToolBodyAgent({ input, result }: { input: Record<string, unknown>; resu
           <div className="tool-agent-prompt-content">{renderMarkdown(prompt)}</div>
         </div>
       )}
-      {result !== undefined && (
+      {resultParsed && (
         <div className="tool-agent-result">
           <div className="chat-tool-label">Result</div>
-          <div className="tool-agent-result-content">{renderMarkdown(parseToolResult(result))}</div>
+          <div className="tool-agent-result-content">{renderMarkdown(resultParsed.content)}</div>
+          {resultParsed.meta && (
+            <div className="tool-agent-meta">{resultParsed.meta}</div>
+          )}
         </div>
       )}
     </div>
@@ -572,6 +633,95 @@ function ToolBodyDefault({ result }: { result?: string }) {
   return <pre className="chat-tool-code chat-tool-output">{truncated}</pre>;
 }
 
+// ── Thinking toolbar for chat input bar ──────────────────────────
+const EFFORT_LEVELS: { value: EffortLevel; label: string; color: string }[] = [
+  { value: 'low', label: 'Lo', color: '#94a3b8' },
+  { value: 'medium', label: 'Med', color: '#60a5fa' },
+  { value: 'high', label: 'Hi', color: '#a78bfa' },
+];
+const BUDGET_PRESETS = [
+  { label: '10k', value: 10000 },
+  { label: '50k', value: 50000 },
+  { label: '100k', value: 100000 },
+];
+
+interface ThinkingToolbarProps {
+  enabled: boolean;
+  effort: EffortLevel;
+  budget: number;
+  onToggle: (enabled: boolean) => void;
+  onEffortChange: (effort: EffortLevel) => void;
+  onBudgetChange: (budget: number) => void;
+}
+
+function ThinkingToolbar({ enabled, effort, budget, onToggle, onEffortChange, onBudgetChange }: ThinkingToolbarProps) {
+  const [showBudget, setShowBudget] = useState(false);
+
+  return (
+    <div className="thinking-toolbar">
+      <button
+        type="button"
+        className={`thinking-toolbar-toggle ${enabled ? 'active' : ''}`}
+        onClick={() => onToggle(!enabled)}
+        title={enabled ? 'Disable extended thinking' : 'Enable extended thinking'}
+      >
+        <Brain size={13} />
+        <span>{enabled ? 'Thinking' : 'Think'}</span>
+      </button>
+      {enabled && (
+        <>
+          <div className="thinking-toolbar-effort">
+            {EFFORT_LEVELS.map(e => (
+              <button
+                key={e.value}
+                type="button"
+                className={`thinking-effort-btn ${effort === e.value ? 'active' : ''}`}
+                onClick={() => onEffortChange(e.value)}
+                title={`${e.value} effort`}
+              >
+                {e.label}
+              </button>
+            ))}
+          </div>
+          <button
+            type="button"
+            className={`thinking-toolbar-budget-toggle ${showBudget ? 'active' : ''}`}
+            onClick={() => setShowBudget(!showBudget)}
+            title="Adjust token budget"
+          >
+            {(budget / 1000).toFixed(0)}k
+          </button>
+          {showBudget && (
+            <div className="thinking-toolbar-budget">
+              {BUDGET_PRESETS.map(p => (
+                <button
+                  key={p.value}
+                  type="button"
+                  className={`thinking-budget-btn ${budget === p.value ? 'active' : ''}`}
+                  onClick={() => onBudgetChange(p.value)}
+                >
+                  {p.label}
+                </button>
+              ))}
+              <input
+                type="number"
+                value={budget}
+                onChange={e => {
+                  const v = parseInt(e.target.value, 10);
+                  if (!isNaN(v) && v > 0) onBudgetChange(v);
+                }}
+                className="thinking-budget-input"
+                title="Custom token budget"
+                onClick={e => e.stopPropagation()}
+              />
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 // ── Thinking block (collapsible) ──────────────────────────────
 function ThinkingBlock({ text }: { text: string }) {
   const [expanded, setExpanded] = useState(false);
@@ -593,6 +743,177 @@ function ThinkingBlock({ text }: { text: string }) {
   );
 }
 
+// ── Expanded tool output modal ─────────────────────────────────
+function ToolExpandedModal({ tool, onClose }: {
+  tool: { name: string; input: unknown; result?: string; isError?: boolean; children?: ChatPart[] };
+  onClose: () => void;
+}) {
+  const inp = (tool.input && typeof tool.input === 'object' ? tool.input : {}) as Record<string, unknown>;
+  const borderColor = getToolBorderColor(tool.name);
+  const icon = getToolIcon(tool.name);
+  const summary = getToolSummary(tool.name, tool.input);
+
+  // Close on Escape
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [onClose]);
+
+  // Render full content without truncation
+  const renderExpandedContent = () => {
+    switch (tool.name) {
+      case 'Agent': {
+        const prompt = inp.prompt as string | undefined;
+        const desc = inp.description as string | undefined;
+        const resultContent = (() => {
+          if (tool.result === undefined) return null;
+          const json = tryParseJSON(tool.result);
+          if (Array.isArray(json)) {
+            const blocks = parseContentBlocks(json);
+            if (blocks) return { content: blocks.texts.join('\n\n'), meta: blocks.meta };
+          }
+          return { content: parseToolResult(tool.result), meta: null };
+        })();
+        return (
+          <>
+            {desc && <div className="expanded-section-label">Description</div>}
+            {desc && <div className="expanded-agent-desc">{desc}</div>}
+            {prompt && <div className="expanded-section-label">Prompt</div>}
+            {prompt && <div className="expanded-agent-prompt">{renderMarkdown(prompt)}</div>}
+            {resultContent && <div className="expanded-section-label">Result</div>}
+            {resultContent && (
+              <div className="expanded-content-body">
+                {renderMarkdown(resultContent.content)}
+                {resultContent.meta && <div className="tool-agent-meta">{resultContent.meta}</div>}
+              </div>
+            )}
+          </>
+        );
+      }
+      case 'Bash': {
+        const cmd = inp.command as string | undefined;
+        const desc = inp.description as string | undefined;
+        const output = tool.result !== undefined ? parseToolResult(tool.result) : undefined;
+        return (
+          <>
+            {desc && <div className="expanded-section-label">Description</div>}
+            {desc && <div className="expanded-bash-desc">{desc}</div>}
+            {cmd && <div className="expanded-section-label">Command</div>}
+            {cmd && <pre className="expanded-code-block expanded-code-cmd"><code>{cmd}</code></pre>}
+            {output !== undefined && <div className="expanded-section-label">Output</div>}
+            {output !== undefined && <pre className="expanded-code-block">{output}</pre>}
+          </>
+        );
+      }
+      case 'Edit': {
+        const filePath = inp.file_path as string | undefined;
+        const oldStr = inp.old_string as string | undefined;
+        const newStr = inp.new_string as string | undefined;
+        const replaceAll = inp.replace_all as boolean | undefined;
+        const diffLines = (oldStr !== undefined && newStr !== undefined)
+          ? computeUnifiedDiff(oldStr, newStr) : null;
+        return (
+          <>
+            {filePath && <div className="expanded-file-path">{filePath}</div>}
+            {replaceAll && <span className="tool-edit-badge">replace all</span>}
+            {diffLines ? (
+              <div className="expanded-diff">
+                {diffLines.map((line, i) => (
+                  <div key={i} className={`tool-diff-line tool-diff-line-${line.type}`}>
+                    <span className="tool-diff-prefix">
+                      {line.type === 'del' ? '−' : line.type === 'add' ? '+' : ' '}
+                    </span>
+                    <span className="tool-diff-text">{line.text || ' '}</span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="tool-diff">
+                {oldStr !== undefined && <pre className="tool-diff-old">{oldStr || '(empty)'}</pre>}
+                {newStr !== undefined && <pre className="tool-diff-new">{newStr || '(empty)'}</pre>}
+              </div>
+            )}
+          </>
+        );
+      }
+      case 'Write': {
+        const filePath = inp.file_path as string | undefined;
+        const content = inp.content as string | undefined;
+        return (
+          <>
+            {filePath && <div className="expanded-file-path">{filePath}</div>}
+            {content !== undefined && <div className="expanded-section-label">Content</div>}
+            {content !== undefined && <pre className="expanded-code-block">{content}</pre>}
+          </>
+        );
+      }
+      case 'Read': {
+        const filePath = inp.file_path as string | undefined;
+        const readData = tool.result ? parseReadResult(tool.result) : null;
+        const displayContent = readData?.content ?? (tool.result ? parseToolResult(tool.result) : undefined);
+        const displayPath = readData?.filePath ?? filePath;
+        const lineInfo = readData && readData.totalLines
+          ? `${readData.totalLines} lines` + (readData.startLine && readData.startLine > 1 ? ` (from line ${readData.startLine})` : '')
+          : null;
+        return (
+          <>
+            {displayPath && <div className="expanded-file-path">{displayPath}</div>}
+            {lineInfo && <span className="tool-file-meta">{lineInfo}</span>}
+            {displayContent !== undefined && <pre className="expanded-code-block">{displayContent}</pre>}
+          </>
+        );
+      }
+      case 'Grep':
+      case 'Glob': {
+        const pattern = inp.pattern as string | undefined;
+        const glob = inp.glob as string | undefined;
+        const parsed = tool.result ? parseToolResult(tool.result) : undefined;
+        return (
+          <>
+            <div className="tool-search-query" style={{ marginBottom: 12 }}>
+              {pattern && <code className="chat-inline-code">/{pattern}/</code>}
+              {glob && <span className="tool-search-glob"> in {glob}</span>}
+            </div>
+            {parsed !== undefined && <pre className="expanded-code-block">{parsed}</pre>}
+          </>
+        );
+      }
+      case 'TodoWrite':
+        return <ToolBodyTodo input={inp} />;
+      default: {
+        const output = tool.result !== undefined ? parseToolResult(tool.result) : undefined;
+        return output !== undefined
+          ? <pre className="expanded-code-block">{output}</pre>
+          : <div className="text-muted" style={{ fontStyle: 'italic' }}>No output</div>;
+      }
+    }
+  };
+
+  return (
+    <div className="expanded-overlay" onClick={onClose}>
+      <div className="expanded-modal" onClick={e => e.stopPropagation()}>
+        {/* Header */}
+        <div className="expanded-header" style={{ borderLeftColor: borderColor }}>
+          <div className="expanded-header-left">
+            {icon}
+            <span className="expanded-header-name">{tool.name}</span>
+            {summary && <span className="expanded-header-summary">{summary}</span>}
+            {tool.isError && <span className="expanded-error-badge">error</span>}
+          </div>
+          <button className="expanded-close-btn" onClick={onClose}>
+            <X size={16} />
+          </button>
+        </div>
+        {/* Body */}
+        <div className="expanded-body">
+          {renderExpandedContent()}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── ToolCall collapsible block ─────────────────────────────────
 function ToolCallBlock({ tool, isJobRunning, isLastInGroup, depth = 0 }: {
   tool: { name: string; input: unknown; result?: string; isError?: boolean; children?: ChatPart[] };
@@ -608,6 +929,7 @@ function ToolCallBlock({ tool, isJobRunning, isLastInGroup, depth = 0 }: {
   const defaultOpen = isNested ? false : (tool.name === 'TodoWrite' || tool.name === 'Edit' || tool.name === 'Write' || isAgent);
   const [expanded, setExpanded] = useState(isActive || defaultOpen);
   const [showRaw, setShowRaw] = useState(false);
+  const [showExpanded, setShowExpanded] = useState(false);
   const borderColor = getToolBorderColor(tool.name);
   const hasChildren = tool.children && tool.children.length > 0;
 
@@ -720,6 +1042,13 @@ function ToolCallBlock({ tool, isJobRunning, isLastInGroup, depth = 0 }: {
             {tool.isError ? 'error' : 'done'}
           </span>
         )}
+        <button
+          className="chat-tool-expand-btn"
+          title="Expand in fullscreen"
+          onClick={e => { e.stopPropagation(); setShowExpanded(true); }}
+        >
+          <Maximize2 size={12} />
+        </button>
       </div>
       {expanded && (
         <div className="chat-tool-body">
@@ -731,6 +1060,9 @@ function ToolCallBlock({ tool, isJobRunning, isLastInGroup, depth = 0 }: {
             {showRaw ? '← Rendered' : '{ } Raw'}
           </button>
         </div>
+      )}
+      {showExpanded && (
+        <ToolExpandedModal tool={tool} onClose={() => setShowExpanded(false)} />
       )}
     </div>
   );
@@ -892,6 +1224,81 @@ function MemorySidebarGroup({ section, badgeClass, selectedMemory, onSelect }: {
   );
 }
 
+// ── Fork / Edit modal ─────────────────────────────────────────
+function ForkModal({ isOpen, onClose, onSubmit, mode, originalText, turnTimestamp, submitting }: {
+  isOpen: boolean;
+  onClose: () => void;
+  onSubmit: (prompt: string) => void;
+  mode: 'fork' | 'edit';
+  originalText?: string;
+  turnTimestamp?: string;
+  submitting?: boolean;
+}) {
+  const [text, setText] = useState(originalText ?? '');
+  const textRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    setText(originalText ?? '');
+  }, [originalText, isOpen]);
+
+  useEffect(() => {
+    if (isOpen && textRef.current) {
+      textRef.current.focus();
+      if (mode === 'edit') {
+        // Place cursor at end for edit mode
+        const len = textRef.current.value.length;
+        textRef.current.selectionStart = len;
+        textRef.current.selectionEnd = len;
+      }
+    }
+  }, [isOpen, mode]);
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="fork-modal-overlay" onClick={onClose}>
+      <div className="fork-modal" onClick={e => e.stopPropagation()}>
+        <div className="fork-modal-header">
+          {mode === 'fork' ? (
+            <><GitBranch size={14} /> Fork Conversation</>
+          ) : (
+            <><Edit3 size={14} /> Edit & Resend</>
+          )}
+        </div>
+        <div className="fork-modal-context">
+          {mode === 'fork'
+            ? `Branch after Claude's response${turnTimestamp ? ` at ${turnTimestamp}` : ''}`
+            : 'This creates a new job branching before this message. The original job is unchanged.'}
+        </div>
+        <textarea
+          ref={textRef}
+          className="fork-modal-textarea"
+          value={text}
+          onChange={e => setText(e.target.value)}
+          placeholder={mode === 'fork' ? 'Enter your prompt for the fork...' : 'Edit your message...'}
+          rows={4}
+          onKeyDown={e => {
+            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && text.trim()) {
+              onSubmit(text.trim());
+            }
+            if (e.key === 'Escape') onClose();
+          }}
+        />
+        <div className="fork-modal-actions">
+          <button className="btn btn-sm" onClick={onClose} disabled={submitting}>Cancel</button>
+          <button
+            className="btn btn-primary btn-sm"
+            onClick={() => text.trim() && onSubmit(text.trim())}
+            disabled={!text.trim() || submitting}
+          >
+            {submitting ? (mode === 'edit' ? 'Resending...' : 'Forking...') : mode === 'fork' ? <><GitBranch size={12} /> Fork & Run</> : <><Edit3 size={12} /> Edit & Resend</>}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Collapsible long text block ────────────────────────────────
 function CollapsibleUserText({ text }: { text: string }) {
   const [expanded, setExpanded] = useState(false);
@@ -915,8 +1322,8 @@ function CollapsibleUserText({ text }: { text: string }) {
 }
 
 // ── Main component ─────────────────────────────────────────────
-export function JobDetail({ job, logs, projectId, onNewJob }: Props) {
-  const [tab, setTab] = useState<'chat' | 'output' | 'files' | 'git' | 'memories' | 'cron'>('chat');
+export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs }: Props) {
+  const [tab, setTab] = useState<'chat' | 'terminal' | 'output' | 'files' | 'git' | 'memories' | 'cron'>('chat');
   const [fullLogs, setFullLogs] = useState<LogEntry[]>([]);
   const [files, setFiles] = useState<any[]>([]);
   const [fileContent, setFileContent] = useState<{ path: string; content: string } | null>(null);
@@ -925,6 +1332,9 @@ export function JobDetail({ job, logs, projectId, onNewJob }: Props) {
   const [fileSearching, setFileSearching] = useState(false);
   const fileSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [followUp, setFollowUp] = useState('');
+  const [inputThinkingEnabled, setInputThinkingEnabled] = useState(() => job.thinking?.type === 'enabled');
+  const [inputThinkingEffort, setInputThinkingEffort] = useState<EffortLevel>(() => (job.thinking?.type === 'enabled' && job.thinking.effort) || 'medium');
+  const [inputThinkingBudget, setInputThinkingBudget] = useState(() => (job.thinking?.type === 'enabled' && job.thinking.budgetTokens) || 10000);
   const [memorySections, setMemorySections] = useState<any[] | null>(null);
   const [selectedMemory, setSelectedMemory] = useState<string | null>(null);
   const [editingMemory, setEditingMemory] = useState<{ filePath: string; content: string } | null>(null);
@@ -939,9 +1349,26 @@ export function JobDetail({ job, logs, projectId, onNewJob }: Props) {
   const [gitActionOutput, setGitActionOutput] = useState<{ ok: boolean; text: string } | null>(null);
   const [gitShowStaged, setGitShowStaged] = useState(false);
   const [promptExpanded, setPromptExpanded] = useState(false);
+  const [idleCountdown, setIdleCountdown] = useState('');
+  const [forkModal, setForkModal] = useState<{
+    open: boolean;
+    turnIndex: number;
+    type: 'after_assistant' | 'edit_user';
+    originalText?: string;
+    timestamp?: string;
+  } | null>(null);
+  const [forkSubmitting, setForkSubmitting] = useState(false);
   const termRef = useRef<HTMLDivElement>(null);
   const chatRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  const attach = useAttachments();
+
+  // Clear attachments when switching to a different job
+  useEffect(() => {
+    attach.clearAll();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [job.id]);
 
   // Commands for / suggestions — contextual to current job state
   const suggestionCommands = useMemo<CommandDef[]>(() => {
@@ -988,7 +1415,8 @@ export function JobDetail({ job, logs, projectId, onNewJob }: Props) {
   }, [job.id, job.status, onNewJob]);
 
   // Fetch SDK slash commands from active session (with retry for race condition)
-  const [sdkCommands, setSdkCommands] = useState<SDKSlashCommand[]>([]);
+  // Falls back to static FALLBACK_SDK_COMMANDS when no live session is available
+  const [sdkCommands, setSdkCommands] = useState<SDKSlashCommand[]>(FALLBACK_SDK_COMMANDS);
   useEffect(() => {
     let cancelled = false;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1003,13 +1431,17 @@ export function JobDetail({ job, logs, projectId, onNewJob }: Props) {
             } else if (attempt < 3) {
               // Server may not have queryHandle ready yet — retry after delay
               retryTimer = setTimeout(() => fetchCommands(attempt + 1), 1500 * attempt);
+            } else {
+              // Exhausted retries — fall back to static commands
+              setSdkCommands(FALLBACK_SDK_COMMANDS);
             }
           })
-          .catch(() => { if (!cancelled) setSdkCommands([]); });
+          .catch(() => { if (!cancelled) setSdkCommands(FALLBACK_SDK_COMMANDS); });
       };
       fetchCommands(1);
     } else {
-      setSdkCommands([]);
+      // For non-active jobs (completed/failed with canContinue), show static fallback
+      setSdkCommands(FALLBACK_SDK_COMMANDS);
     }
 
     return () => {
@@ -1038,6 +1470,27 @@ export function JobDetail({ job, logs, projectId, onNewJob }: Props) {
     setFullLogs([]);
     api.getJob(job.id).then(j => setFullLogs(j.logs ?? [])).catch(() => {});
   }, [job.id]);
+
+  // Idle grace period countdown timer
+  useEffect(() => {
+    if (!job.idleDeadline || job.status !== 'idle' || job.mode === 'session') {
+      setIdleCountdown('');
+      return;
+    }
+    const update = () => {
+      const remaining = new Date(job.idleDeadline!).getTime() - Date.now();
+      if (remaining <= 0) {
+        setIdleCountdown('0:00');
+        return;
+      }
+      const mins = Math.floor(remaining / 60000);
+      const secs = Math.floor((remaining % 60000) / 1000);
+      setIdleCountdown(`${mins}:${secs.toString().padStart(2, '0')}`);
+    };
+    update();
+    const interval = setInterval(update, 1000);
+    return () => clearInterval(interval);
+  }, [job.idleDeadline, job.status, job.mode]);
 
   const allLogs = useMemo(() => {
     const seen = new Set<string>();
@@ -1115,14 +1568,62 @@ export function JobDetail({ job, logs, projectId, onNewJob }: Props) {
   const handleStop = () => api.stopJob(job.id).catch(console.error);
   const handleArchive = () => api.archiveJob(job.id).catch(console.error);
   const handleCloseSession = () => api.closeSession(job.id).catch(console.error);
+  // Build current thinking config from input state
+  const buildThinkingConfig = (): ThinkingConfig | undefined => {
+    if (!inputThinkingEnabled) return undefined; // undefined = server default (disabled)
+    return { type: 'enabled', budgetTokens: inputThinkingBudget, effort: inputThinkingEffort };
+  };
+
+  const handleThinkingToggle = (enabled: boolean) => {
+    setInputThinkingEnabled(enabled);
+    const thinking: ThinkingConfig | null = enabled
+      ? { type: 'enabled', budgetTokens: inputThinkingBudget, effort: inputThinkingEffort }
+      : null;
+    api.updateJobThinking(job.id, thinking).catch(console.error);
+  };
+  const handleThinkingEffortChange = (effort: EffortLevel) => {
+    setInputThinkingEffort(effort);
+    api.updateJobThinking(job.id, { type: 'enabled', budgetTokens: inputThinkingBudget, effort }).catch(console.error);
+  };
+  const handleThinkingBudgetChange = (budget: number) => {
+    setInputThinkingBudget(budget);
+    api.updateJobThinking(job.id, { type: 'enabled', budgetTokens: budget, effort: inputThinkingEffort }).catch(console.error);
+  };
+
   const handleSend = () => {
     if (!followUp.trim() || suggestions.isOpen) return;
-    const isSession = job.mode === 'session';
-    const isIdle = job.status === 'idle';
-    if (isSession && isIdle) {
-      api.continueJob(job.id, followUp).then(() => setFollowUp('')).catch(console.error);
-    } else {
-      api.continueJob(job.id, followUp).then(() => setFollowUp('')).catch(console.error);
+    const resetTextarea = () => {
+      setFollowUp('');
+      attach.clearAll();
+      if (inputRef.current) inputRef.current.style.height = 'auto';
+    };
+    const thinking = buildThinkingConfig();
+    const sendAttachments = attach.attachments.length > 0 ? attach.attachments : undefined;
+    api.continueJob(job.id, followUp, thinking, sendAttachments).then(resetTextarea).catch(console.error);
+  };
+
+  // ── Fork handlers ──
+  const canFork = !!job.sessionId && job.status !== 'running' && job.status !== 'idle';
+
+  const openForkModal = (turnIndex: number, type: 'after_assistant' | 'edit_user', originalText?: string, timestamp?: string) => {
+    setForkModal({ open: true, turnIndex, type, originalText, timestamp });
+  };
+
+  const handleFork = async (prompt: string) => {
+    if (!forkModal) return;
+    setForkSubmitting(true);
+    try {
+      const result = await api.forkJob(job.id, {
+        prompt,
+        forkPoint: { type: forkModal.type, turnIndex: forkModal.turnIndex },
+      });
+      setForkModal(null);
+      if (result?.id && onSelectJob) onSelectJob(result.id);
+    } catch (err: any) {
+      console.error('[fork] Error:', err);
+      alert(`Fork failed: ${err.message || 'Unknown error'}`);
+    } finally {
+      setForkSubmitting(false);
     }
   };
 
@@ -1202,9 +1703,11 @@ export function JobDetail({ job, logs, projectId, onNewJob }: Props) {
   const isRunning = job.status === 'running';
   const isIdle = job.status === 'idle';
   const isSession = job.mode === 'session';
-  const canSendMessage = isSession && isIdle;
+  const canSendMessage = isIdle;  // All idle jobs can send messages (session or regular with grace period)
+  const canQueueMessage = isRunning; // Can queue messages while Claude is working
   const canContinue = (job.status === 'completed' || job.status === 'failed') && !!job.sessionId;
-  const showInput = canSendMessage || canContinue;
+  const showInput = canSendMessage || canContinue || canQueueMessage;
+  const hasIdleDeadline = isIdle && !isSession && !!job.idleDeadline;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
@@ -1214,14 +1717,19 @@ export function JobDetail({ job, logs, projectId, onNewJob }: Props) {
           <div className="flex items-center gap-3">
             <span className={`badge badge-${job.status}`}>
               {isRunning ? <span className="running-indicator">{job.status}</span>
-                : isIdle ? <span className="running-indicator">● session</span>
+                : isIdle ? <span className="running-indicator">{isSession ? '● session' : '● idle'}</span>
                 : job.status}
             </span>
+            {(job.thinking?.type === 'enabled' || inputThinkingEnabled) && (
+              <span className="badge badge-thinking" title={`Extended thinking: ${inputThinkingEffort} effort, ${(inputThinkingBudget / 1000).toFixed(0)}k tokens`}>
+                <Brain size={11} /> {inputThinkingEffort}
+              </span>
+            )}
             <span className="text-sm text-muted font-mono">{job.id.slice(0, 8)}</span>
           </div>
           <div className="flex gap-2">
-            {isIdle && isSession && (
-              <span className="session-indicator">Session Active</span>
+            {isIdle && (
+              <span className="session-indicator">{isSession ? 'Session Active' : 'Idle'}</span>
             )}
             {(isRunning || isIdle) && (
               <button className="btn btn-danger btn-sm" onClick={handleStop}>
@@ -1233,6 +1741,21 @@ export function JobDetail({ job, logs, projectId, onNewJob }: Props) {
                 Close Session
               </button>
             )}
+            {hasIdleDeadline && (
+              <button className="btn btn-sm btn-accent" onClick={() => api.keepAlive(job.id).catch(console.error)}>
+                <Star size={12} /> Pin as Session
+              </button>
+            )}
+            {isIdle && !isSession && (
+              <button className="btn btn-sm" onClick={() => api.completeNow(job.id).catch(console.error)}>
+                <Check size={12} /> Complete Now
+              </button>
+            )}
+            {(job.status === 'completed' || job.status === 'failed') && !isSession && (
+              <button className="btn btn-sm btn-accent" onClick={() => api.keepAlive(job.id).catch(console.error)}>
+                <Star size={12} /> Convert to Session
+              </button>
+            )}
             {job.status !== 'archived' && !isRunning && !isIdle && (
               <button className="btn btn-sm" onClick={handleArchive}>
                 <Archive size={12} /> Archive
@@ -1240,6 +1763,28 @@ export function JobDetail({ job, logs, projectId, onNewJob }: Props) {
             )}
           </div>
         </div>
+        {hasIdleDeadline && idleCountdown && (
+          <div className="idle-countdown-bar">
+            <Clock size={12} />
+            <span>Auto-completing in <strong>{idleCountdown}</strong></span>
+            <span className="idle-countdown-hint">Send a message or pin as session to keep alive</span>
+          </div>
+        )}
+        {job.forkedFrom && (
+          <div className="fork-lineage">
+            <GitBranch size={11} />
+            <span>Forked from </span>
+            {onSelectJob ? (
+              <button className="btn-link" onClick={() => onSelectJob(job.forkedFrom!.jobId)}>
+                {allJobs?.find(j => j.id === job.forkedFrom!.jobId)?.name
+                  || allJobs?.find(j => j.id === job.forkedFrom!.jobId)?.prompt?.slice(0, 40)
+                  || job.forkedFrom.jobId.slice(0, 8)}
+              </button>
+            ) : (
+              <span>{job.forkedFrom.jobId.slice(0, 8)}</span>
+            )}
+          </div>
+        )}
         {(() => {
           const lineCount = job.prompt.split('\n').length;
           const isLong = lineCount > 4 || job.prompt.length > 200;
@@ -1273,6 +1818,9 @@ export function JobDetail({ job, logs, projectId, onNewJob }: Props) {
         <div className={`tab ${tab === 'chat' ? 'active' : ''}`} onClick={() => setTab('chat')}>
           <span className="flex items-center gap-2"><MessageSquare size={12} /> Chat</span>
         </div>
+        <div className={`tab ${tab === 'terminal' ? 'active' : ''}`} onClick={() => setTab('terminal')}>
+          <span className="flex items-center gap-2"><Terminal size={12} /> Terminal</span>
+        </div>
         <div className={`tab ${tab === 'output' ? 'active' : ''}`} onClick={() => setTab('output')}>
           <span className="flex items-center gap-2"><ScrollText size={12} /> Output</span>
         </div>
@@ -1291,7 +1839,7 @@ export function JobDetail({ job, logs, projectId, onNewJob }: Props) {
       </div>
 
       {/* Body */}
-      <div className="detail-body">
+      <div className={`detail-body${tab === 'terminal' ? ' detail-body-no-padding' : ''}`}>
         {/* ── Chat tab ── */}
         {tab === 'chat' && (
           <div className="chat-tab-wrapper">
@@ -1309,8 +1857,29 @@ export function JobDetail({ job, logs, projectId, onNewJob }: Props) {
                   <div key={i} className={`chat-message chat-message-${msg.role} ${msg.isResult ? 'chat-message-result' : ''} ${msg.isError ? 'chat-message-error' : ''}`}>
                     <div className="chat-message-header">
                       <span className="chat-message-role">{msg.role === 'user' ? 'You' : 'Claude'}</span>
+                      {msg.role === 'user' && canFork && (
+                        <button
+                          className="btn-edit-message"
+                          onClick={() => openForkModal(
+                            msg.turnIndex,
+                            'edit_user',
+                            msg.parts[0]?.kind === 'text' ? msg.parts[0].text : '',
+                            formatTime(msg.timestamp)
+                          )}
+                          title="Edit & resend (creates a fork)"
+                        >
+                          <Edit3 size={11} />
+                        </button>
+                      )}
                       <span className="chat-message-time">{formatTime(msg.timestamp)}</span>
                     </div>
+                    {msg.role === 'user' && msg.attachments && msg.attachments.length > 0 && (
+                      <div className="chat-user-attachments">
+                        {msg.attachments.map((att, ai) => (
+                          <AttachmentBadge key={ai} filename={att.filename} mediaType={att.mediaType} size={att.size} />
+                        ))}
+                      </div>
+                    )}
                     {msg.parts.map((part, j) => {
                       if (part.kind === 'text') {
                         if (msg.role === 'user') {
@@ -1336,6 +1905,22 @@ export function JobDetail({ job, logs, projectId, onNewJob }: Props) {
                         </div>
                       );
                     })}
+                    {msg.role === 'assistant' && !msg.isResult && !msg.isError && canFork && (
+                      <div className="chat-message-fork-actions">
+                        <button
+                          className="btn-fork"
+                          onClick={() => openForkModal(
+                            msg.turnIndex,
+                            'after_assistant',
+                            undefined,
+                            formatTime(msg.timestamp)
+                          )}
+                          title="Fork conversation from here"
+                        >
+                          <GitBranch size={12} /> Fork
+                        </button>
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -1349,38 +1934,89 @@ export function JobDetail({ job, logs, projectId, onNewJob }: Props) {
             </div>
 
             {showInput && (
-              <div className="chat-input-bar">
-                <div className="suggestion-wrapper">
+              <div
+                className={`chat-input-bar${canQueueMessage ? ' chat-input-queued' : ''}${attach.isDragging ? ' drop-zone-active' : ''}`}
+                onDragEnter={attach.handleDragEnter}
+                onDragOver={attach.handleDragOver}
+                onDragLeave={attach.handleDragLeave}
+                onDrop={attach.handleDrop}
+              >
+                {canQueueMessage && (
+                  <div className="chat-queue-hint">Message will be queued and processed after the current turn</div>
+                )}
+                <ThinkingToolbar
+                  enabled={inputThinkingEnabled}
+                  effort={inputThinkingEffort}
+                  budget={inputThinkingBudget}
+                  onToggle={handleThinkingToggle}
+                  onEffortChange={handleThinkingEffortChange}
+                  onBudgetChange={handleThinkingBudgetChange}
+                />
+                <AttachmentPreview attachments={attach.attachments} onRemove={attach.removeAttachment} />
+                {attach.error && <p className="attachment-error">{attach.error}</p>}
+                <div className="chat-input-row">
                   <input
-                    ref={tab === 'chat' ? inputRef : undefined}
-                    className="input flex-1"
-                    placeholder={canSendMessage ? 'Type @ for files, / for commands...' : 'Send follow-up prompt... (@ files, / commands)'}
-                    value={followUp}
-                    onChange={suggestions.handleChange}
-                    onKeyDown={e => {
-                      suggestions.handleKeyDown(e);
-                      if (!e.defaultPrevented && e.key === 'Enter') handleSend();
+                    ref={attach.fileInputRef as React.RefObject<HTMLInputElement>}
+                    type="file"
+                    accept="image/jpeg,image/png,image/gif,image/webp"
+                    multiple
+                    style={{ display: 'none' }}
+                    onChange={e => {
+                      if (e.target.files) attach.addFiles(e.target.files);
+                      e.target.value = '';
                     }}
                   />
-                  {suggestions.isOpen && tab === 'chat' && (
-                    <SuggestionDropdown
-                      items={suggestions.items}
-                      selectedIndex={suggestions.selectedIndex}
-                      onSelect={suggestions.selectItem}
-                      onHover={suggestions.setSelectedIndex}
-                      position="above"
-                      loading={suggestions.loading}
-                      triggerType={suggestions.triggerType}
+                  <button className="btn btn-attach" onClick={attach.openFilePicker} title="Attach images" type="button">
+                    <Paperclip size={14} />
+                  </button>
+                  <div className="suggestion-wrapper">
+                    <textarea
+                      ref={tab === 'chat' ? inputRef : undefined}
+                      className="chat-textarea flex-1"
+                      placeholder={canQueueMessage ? 'Queue a message for Claude...' : canSendMessage ? 'Type @ for files, / for commands...' : 'Send follow-up prompt... (@ files, / commands)'}
+                      value={followUp}
+                      onChange={suggestions.handleChange}
+                      onPaste={attach.handlePaste}
+                      rows={1}
+                      onKeyDown={e => {
+                        suggestions.handleKeyDown(e);
+                        if (e.defaultPrevented) return;
+                        if (e.key === 'Enter' && e.shiftKey) {
+                          e.preventDefault();
+                          handleSend();
+                        }
+                      }}
+                      onInput={e => {
+                        const el = e.currentTarget;
+                        el.style.height = 'auto';
+                        el.style.height = Math.min(el.scrollHeight, 200) + 'px';
+                      }}
                     />
-                  )}
+                    {suggestions.isOpen && tab === 'chat' && (
+                      <SuggestionDropdown
+                        items={suggestions.items}
+                        selectedIndex={suggestions.selectedIndex}
+                        onSelect={suggestions.selectItem}
+                        onHover={suggestions.setSelectedIndex}
+                        position="above"
+                        loading={suggestions.loading}
+                        triggerType={suggestions.triggerType}
+                      />
+                    )}
+                  </div>
+                  <button className="btn btn-primary" onClick={handleSend} disabled={!followUp.trim()}>
+                    {canQueueMessage ? <><ListPlus size={12} /> Queue</> : <><Play size={12} /> {canSendMessage ? 'Send' : 'Continue'}</>}
+                  </button>
                 </div>
-                <button className="btn btn-primary" onClick={handleSend} disabled={!followUp.trim()}>
-                  <Play size={12} /> {canSendMessage ? 'Send' : 'Continue'}
-                </button>
               </div>
             )}
           </div>
         )}
+
+        {/* ── Terminal tab (persistent — hidden, not unmounted) ── */}
+        <div className="terminal-tab-wrapper" style={{ display: tab === 'terminal' ? 'flex' : 'none', flexDirection: 'column', height: '100%' }}>
+          <TerminalPane projectId={projectId} active={tab === 'terminal'} />
+        </div>
 
         {/* ── Output tab (raw logs) ── */}
         {tab === 'output' && (
@@ -1397,34 +2033,69 @@ export function JobDetail({ job, logs, projectId, onNewJob }: Props) {
             </div>
 
             {showInput && (
-              <div className="chat-input-bar">
-                <div className="suggestion-wrapper">
-                  <input
-                    ref={tab === 'output' ? inputRef : undefined}
-                    className="input flex-1"
-                    placeholder={canSendMessage ? 'Type @ for files, / for commands...' : 'Send follow-up prompt... (@ files, / commands)'}
-                    value={followUp}
-                    onChange={suggestions.handleChange}
-                    onKeyDown={e => {
-                      suggestions.handleKeyDown(e);
-                      if (!e.defaultPrevented && e.key === 'Enter') handleSend();
-                    }}
-                  />
-                  {suggestions.isOpen && tab === 'output' && (
-                    <SuggestionDropdown
-                      items={suggestions.items}
-                      selectedIndex={suggestions.selectedIndex}
-                      onSelect={suggestions.selectItem}
-                      onHover={suggestions.setSelectedIndex}
-                      position="above"
-                      loading={suggestions.loading}
-                      triggerType={suggestions.triggerType}
+              <div
+                className={`chat-input-bar${canQueueMessage ? ' chat-input-queued' : ''}${attach.isDragging ? ' drop-zone-active' : ''}`}
+                onDragEnter={attach.handleDragEnter}
+                onDragOver={attach.handleDragOver}
+                onDragLeave={attach.handleDragLeave}
+                onDrop={attach.handleDrop}
+              >
+                {canQueueMessage && (
+                  <div className="chat-queue-hint">Message will be queued and processed after the current turn</div>
+                )}
+                <ThinkingToolbar
+                  enabled={inputThinkingEnabled}
+                  effort={inputThinkingEffort}
+                  budget={inputThinkingBudget}
+                  onToggle={handleThinkingToggle}
+                  onEffortChange={handleThinkingEffortChange}
+                  onBudgetChange={handleThinkingBudgetChange}
+                />
+                <AttachmentPreview attachments={attach.attachments} onRemove={attach.removeAttachment} />
+                {attach.error && <p className="attachment-error">{attach.error}</p>}
+                <div className="chat-input-row">
+                  <button className="btn btn-attach" onClick={attach.openFilePicker} title="Attach images" type="button">
+                    <Paperclip size={14} />
+                  </button>
+                  <div className="suggestion-wrapper">
+                    <textarea
+                      ref={tab === 'output' ? inputRef : undefined}
+                      className="chat-textarea flex-1"
+                      placeholder={canQueueMessage ? 'Queue a message for Claude...' : canSendMessage ? 'Type @ for files, / for commands...' : 'Send follow-up prompt... (@ files, / commands)'}
+                      value={followUp}
+                      onChange={suggestions.handleChange}
+                      onPaste={attach.handlePaste}
+                      rows={1}
+                      onKeyDown={e => {
+                        suggestions.handleKeyDown(e);
+                        if (e.defaultPrevented) return;
+                        if (e.key === 'Enter' && e.shiftKey) {
+                          e.preventDefault();
+                          handleSend();
+                        }
+                      }}
+                      onInput={e => {
+                        const el = e.currentTarget;
+                        el.style.height = 'auto';
+                        el.style.height = Math.min(el.scrollHeight, 200) + 'px';
+                      }}
                     />
-                  )}
+                    {suggestions.isOpen && tab === 'output' && (
+                      <SuggestionDropdown
+                        items={suggestions.items}
+                        selectedIndex={suggestions.selectedIndex}
+                        onSelect={suggestions.selectItem}
+                        onHover={suggestions.setSelectedIndex}
+                        position="above"
+                        loading={suggestions.loading}
+                        triggerType={suggestions.triggerType}
+                      />
+                    )}
+                  </div>
+                  <button className="btn btn-primary" onClick={handleSend} disabled={!followUp.trim()}>
+                    {canQueueMessage ? <><ListPlus size={12} /> Queue</> : <><Play size={12} /> {canSendMessage ? 'Send' : 'Continue'}</>}
+                  </button>
                 </div>
-                <button className="btn btn-primary" onClick={handleSend} disabled={!followUp.trim()}>
-                  <Play size={12} /> {canSendMessage ? 'Send' : 'Continue'}
-                </button>
               </div>
             )}
           </div>
@@ -1955,6 +2626,17 @@ export function JobDetail({ job, logs, projectId, onNewJob }: Props) {
           </div>
         )}
       </div>
+
+      {/* Fork / Edit modal */}
+      <ForkModal
+        isOpen={!!forkModal?.open}
+        onClose={() => setForkModal(null)}
+        onSubmit={handleFork}
+        mode={forkModal?.type === 'edit_user' ? 'edit' : 'fork'}
+        originalText={forkModal?.originalText}
+        turnTimestamp={forkModal?.timestamp}
+        submitting={forkSubmitting}
+      />
     </div>
   );
 }

@@ -34,6 +34,7 @@ const statusLabels: Record<string, string> = {
   approved: 'approved',
   rejected: 'rejected',
   expired: 'expired',
+  discarded: 'discarded',
 };
 
 export function ApprovalList({ approvals, projects, jobs, selectedApprovalId, onSelect }: Props) {

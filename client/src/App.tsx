@@ -9,8 +9,9 @@ import { ApprovalList } from './components/ApprovalList';
 import { ApprovalDetail } from './components/ApprovalDetail';
 import { NewJobModal } from './components/NewJobModal';
 import { NewProjectModal } from './components/NewProjectModal';
+import { ImportModal } from './components/ImportModal';
 import { CommandPalette } from './components/CommandPalette';
-import { Terminal as TerminalIcon, Plus, ClipboardCheck, Search, Archive, ArchiveRestore } from 'lucide-react';
+import { Terminal as TerminalIcon, Plus, ClipboardCheck, Search, Archive, ArchiveRestore, Download } from 'lucide-react';
 
 export default function App() {
   const store = useStore();
@@ -22,6 +23,7 @@ export default function App() {
   const [showNewProject, setShowNewProject] = useState(false);
   const [showCommandPalette, setShowCommandPalette] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
+  const [showImportModal, setShowImportModal] = useState(false);
 
   // Resizable panels
   const sidebarResize = useResizable({
@@ -52,7 +54,7 @@ export default function App() {
   const selectedProject = store.projects.find(p => p.id === selectedProjectId);
   const projectJobs = store.jobs
     .filter(j => j.projectId === selectedProjectId && j.status !== 'archived')
-    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    .sort((a, b) => new Date(b.lastInteractionAt ?? b.createdAt).getTime() - new Date(a.lastInteractionAt ?? a.createdAt).getTime());
   const archivedJobs = store.jobs
     .filter(j => j.projectId === selectedProjectId && j.status === 'archived')
     .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
@@ -109,6 +111,26 @@ export default function App() {
     }
   };
 
+  const handleArchiveProject = async (projectId: string) => {
+    try {
+      await api.archiveProject(projectId);
+      if (selectedProjectId === projectId) {
+        setSelectedProjectId(null);
+        setSelectedJobId(null);
+      }
+    } catch (err) {
+      console.error('Failed to archive project:', err);
+    }
+  };
+
+  const handleUnarchiveProject = async (projectId: string) => {
+    try {
+      await api.unarchiveProject(projectId);
+    } catch (err) {
+      console.error('Failed to unarchive project:', err);
+    }
+  };
+
   return (
     <div className={`app${sidebarResize.isDragging || splitLeftResize.isDragging ? ' resizing' : ''}`}>
       <Sidebar
@@ -127,6 +149,9 @@ export default function App() {
         onSelectApprovalView={handleSelectApprovalView}
         onNewProject={() => setShowNewProject(true)}
         onOpenSearch={() => setShowCommandPalette(true)}
+        onImport={() => setShowImportModal(true)}
+        onArchiveProject={handleArchiveProject}
+        onUnarchiveProject={handleUnarchiveProject}
         style={{ width: sidebarResize.width, minWidth: sidebarResize.width }}
       />
       <div
@@ -196,6 +221,9 @@ export default function App() {
                     <TerminalIcon size={16} style={{ color: 'var(--accent)' }} />
                     <h2>{selectedProject.name}</h2>
                     <span className="text-sm text-muted font-mono">{selectedProject.path}</span>
+                    {selectedProject.archived && (
+                      <span className="badge badge-archived" style={{ fontSize: 10, padding: '1px 6px' }}>archived</span>
+                    )}
                   </>
                 )}
               </div>
@@ -205,7 +233,7 @@ export default function App() {
                     ← Back to Jobs
                   </button>
                 )}
-                {!showArchived && (
+                {!showArchived && !selectedProject.archived && (
                   <button className="btn btn-primary" onClick={() => setShowNewJob(true)}>
                     <Plus size={14} /> New Job
                   </button>
@@ -265,7 +293,7 @@ export default function App() {
               />
               <div className="split-right">
                 {selectedJob ? (
-                  <JobDetail job={selectedJob} logs={selectedJobLogs} projectId={selectedProjectId!} onNewJob={() => setShowNewJob(true)} />
+                  <JobDetail job={selectedJob} logs={selectedJobLogs} projectId={selectedProjectId!} onNewJob={() => setShowNewJob(true)} onSelectJob={setSelectedJobId} allJobs={store.jobs} />
                 ) : (
                   <div className="empty-state">
                     {showArchived ? (
@@ -290,9 +318,14 @@ export default function App() {
             <TerminalIcon size={64} />
             <h3 style={{ color: 'var(--text-secondary)' }}>Claude Code Server</h3>
             <p>Select or create a project to begin submitting jobs to Claude Code</p>
-            <button className="btn btn-primary" onClick={() => setShowNewProject(true)}>
-              <Plus size={14} /> Create Project
-            </button>
+            <div className="flex gap-2">
+              <button className="btn btn-primary" onClick={() => setShowNewProject(true)}>
+                <Plus size={14} /> Create Project
+              </button>
+              <button className="btn btn-sm" onClick={() => setShowImportModal(true)}>
+                <Download size={14} /> Import Local Sessions
+              </button>
+            </div>
           </div>
         )}
       </div>
@@ -309,6 +342,14 @@ export default function App() {
           projectId={selectedProjectId}
           onClose={() => setShowNewJob(false)}
           onCreated={(j) => { setSelectedJobId(j.id); setShowNewJob(false); }}
+        />
+      )}
+
+      {showImportModal && (
+        <ImportModal
+          importProgress={store.importProgress}
+          importResult={store.importResult}
+          onClose={() => setShowImportModal(false)}
         />
       )}
 

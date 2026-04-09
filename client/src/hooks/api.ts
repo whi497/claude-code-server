@@ -15,13 +15,18 @@ export const api = {
   deleteProject: (id: string) => request(`/projects/${id}`, { method: 'DELETE' }),
   getJobs: (projectId?: string) => request(`/jobs${projectId ? `?projectId=${projectId}` : ''}`),
   getJob: (id: string) => request(`/jobs/${id}`),
-  createJob: (projectId: string, prompt: string, mode?: string) => request('/jobs', { method: 'POST', body: JSON.stringify({ projectId, prompt, mode }) }),
+  createJob: (projectId: string, prompt: string, mode?: string, thinking?: { type: 'disabled' } | { type: 'enabled'; budgetTokens: number; effort?: string }, attachments?: import('../types').Attachment[]) => request('/jobs', { method: 'POST', body: JSON.stringify({ projectId, prompt, mode, thinking, ...(attachments?.length ? { attachments } : {}) }) }),
   renameJob: (id: string, name: string) => request(`/jobs/${id}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
   archiveJob: (id: string) => request(`/jobs/${id}/archive`, { method: 'POST' }),
   unarchiveJob: (id: string) => request(`/jobs/${id}/unarchive`, { method: 'POST' }),
   stopJob: (id: string) => request(`/jobs/${id}/stop`, { method: 'POST' }),
-  continueJob: (id: string, prompt?: string) => request(`/jobs/${id}/continue`, { method: 'POST', body: JSON.stringify({ prompt }) }),
+  continueJob: (id: string, prompt?: string, thinking?: { type: 'disabled' } | { type: 'enabled'; budgetTokens: number; effort?: string }, attachments?: import('../types').Attachment[]) => request(`/jobs/${id}/continue`, { method: 'POST', body: JSON.stringify({ prompt, thinking, ...(attachments?.length ? { attachments } : {}) }) }),
+  updateJobThinking: (id: string, thinking: { type: 'disabled' } | { type: 'enabled'; budgetTokens: number; effort?: string } | null) => request(`/jobs/${id}/thinking`, { method: 'PUT', body: JSON.stringify({ thinking }) }),
+  forkJob: (id: string, body: { prompt: string; forkPoint: { type: 'after_assistant' | 'edit_user'; turnIndex: number } }): Promise<{ id: string }> =>
+    request(`/jobs/${id}/fork`, { method: 'POST', body: JSON.stringify(body) }),
   closeSession: (id: string) => request(`/jobs/${id}/close-session`, { method: 'POST' }),
+  keepAlive: (id: string) => request(`/jobs/${id}/keep-alive`, { method: 'POST' }),
+  completeNow: (id: string) => request(`/jobs/${id}/complete-now`, { method: 'POST' }),
   getFiles: (projectId: string) => request(`/projects/${projectId}/files`),
   getFile: (projectId: string, filePath: string) => request(`/projects/${projectId}/files/${filePath}`),
   searchFiles: (projectId: string, query: string, searchContent = true) => {
@@ -65,4 +70,17 @@ export const api = {
     if (limit) params.set('limit', String(limit));
     return request(`/search?${params.toString()}`);
   },
+  // Project archive
+  archiveProject: (id: string) => request(`/projects/${id}/archive`, { method: 'POST' }),
+  unarchiveProject: (id: string) => request(`/projects/${id}/unarchive`, { method: 'POST' }),
+  // Import from local Claude sessions
+  discoverLocalProjects: (query?: string, refresh?: boolean) => {
+    const params = new URLSearchParams();
+    if (query) params.set('query', query);
+    if (refresh) params.set('refresh', 'true');
+    const qs = params.toString();
+    return request(`/import/discover${qs ? `?${qs}` : ''}`);
+  },
+  importProjects: (selections: Array<{ dirName: string; sessions: string[] }>) =>
+    request('/import/projects', { method: 'POST', body: JSON.stringify({ selections }) }),
 };

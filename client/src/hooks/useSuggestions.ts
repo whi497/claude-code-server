@@ -26,6 +26,26 @@ export interface SDKSlashCommand {
   argumentHint: string;  // e.g. "<instructions>"
 }
 
+/**
+ * Static fallback SDK commands shown when no live SDK session is available.
+ * Used in: New Job modal, completed/failed job continuation input,
+ * and as a fallback when live SDK command fetch fails.
+ */
+export const FALLBACK_SDK_COMMANDS: SDKSlashCommand[] = [
+  { name: 'compact', description: 'Compact conversation to reduce context', argumentHint: '<instructions>' },
+  { name: 'model', description: 'Switch the AI model', argumentHint: '<model-name>' },
+  { name: 'config', description: 'View or change configuration', argumentHint: '' },
+  { name: 'memory', description: 'Edit CLAUDE.md memory files', argumentHint: '' },
+  { name: 'review', description: 'Review a pull request', argumentHint: '<pr-url>' },
+  { name: 'pr-comments', description: 'View and address PR comments', argumentHint: '' },
+  { name: 'init', description: 'Initialize project with CLAUDE.md', argumentHint: '' },
+  { name: 'cost', description: 'Show token usage and costs', argumentHint: '' },
+  { name: 'permissions', description: 'View and manage tool permissions', argumentHint: '' },
+  { name: 'mcp', description: 'Manage MCP servers', argumentHint: '' },
+  { name: 'context', description: 'Show context window usage', argumentHint: '' },
+  { name: 'bug', description: 'Report a bug', argumentHint: '<description>' },
+];
+
 export interface UseSuggestionsOptions {
   inputRef: RefObject<HTMLInputElement | HTMLTextAreaElement | null>;
   value: string;
@@ -367,6 +387,21 @@ export function useSuggestions(options: UseSuggestionsOptions): UseSuggestionsRe
           setValue('');
           onSdkCommand(item.label); // e.g. "/compact"
         }
+      } else {
+        // No active session (e.g. New Job modal) — insert command text into the input
+        const before = value.slice(0, trigger.startPos);
+        const after = value.slice(trigger.startPos + 1 + trigger.query.length);
+        const insertion = `${item.label} `;
+        const newValue = before + insertion + after;
+        setValue(newValue);
+        const newCursorPos = before.length + insertion.length;
+        requestAnimationFrame(() => {
+          const el = inputRef.current;
+          if (el) {
+            el.setSelectionRange(newCursorPos, newCursorPos);
+            el.focus();
+          }
+        });
       }
     }
 

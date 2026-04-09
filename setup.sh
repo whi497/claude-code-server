@@ -4,11 +4,13 @@
 #
 # Usage:
 #   ./setup.sh              # install + start dev mode
-#   ./setup.sh --prod       # install + build client + start production
+#   ./setup.sh --prod       # install + build client + start production (PM2 daemon)
+#   ./setup.sh --prod --fg  # install + build client + start production (foreground)
 #   ./setup.sh --install    # install only (no start)
 #
 # Environment:
 #   ANTHROPIC_API_KEY       # required — set before running or add to .env
+#   ANTHROPIC_BASE_URL      # API base URL (default: https://api.anthropic.com)
 #   PORT                    # server port (default: 3001)
 #   PROJECTS_ROOT           # workspace root (default: ./projects)
 #
@@ -33,19 +35,23 @@ fail()  { echo -e "${RED}[FAIL]${NC} $*"; exit 1; }
 # ── Parse args ───────────────────────────────────────────────────
 MODE="dev"
 INSTALL_ONLY=false
+FOREGROUND=false
 for arg in "$@"; do
   case "$arg" in
     --prod|--production) MODE="prod" ;;
+    --fg|--foreground)   FOREGROUND=true ;;
     --install)           INSTALL_ONLY=true ;;
     --help|-h)
-      echo "Usage: ./setup.sh [--prod] [--install] [--help]"
+      echo "Usage: ./setup.sh [--prod [--fg]] [--install] [--help]"
       echo ""
       echo "  (default)    Install dependencies + start dev mode (HMR)"
-      echo "  --prod       Install + build client + start production server"
+      echo "  --prod       Install + build client + start production via PM2 (daemon)"
+      echo "  --prod --fg  Install + build client + start production foreground (no PM2)"
       echo "  --install    Install dependencies only, don't start"
       echo ""
       echo "Environment variables:"
       echo "  ANTHROPIC_API_KEY   (required) Your Anthropic API key"
+      echo "  ANTHROPIC_BASE_URL  API base URL (default: https://api.anthropic.com)"
       echo "  PORT                Server port (default: 3001)"
       echo "  PROJECTS_ROOT       Workspace root (default: ./projects)"
       exit 0
@@ -109,6 +115,13 @@ if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
 fi
 ok "ANTHROPIC_API_KEY is set"
 
+# ── 3b. Check ANTHROPIC_BASE_URL ────────────────────────────────
+if [ -z "${ANTHROPIC_BASE_URL:-}" ]; then
+  info "ANTHROPIC_BASE_URL not set (will use default: https://api.anthropic.com)"
+else
+  ok "ANTHROPIC_BASE_URL = ${ANTHROPIC_BASE_URL}"
+fi
+
 # ── 4. Install dependencies ──────────────────────────────────────
 echo ""
 info "Installing dependencies..."
@@ -148,15 +161,37 @@ if [ "$MODE" = "prod" ]; then
   ok "Client built → client/dist/"
 
   echo ""
-  echo -e "  ${BOLD}${GREEN}Starting production server...${NC}"
-  echo -e "  ─────────────────────────────"
-  echo -e "  ${BOLD}Server:${NC}  http://localhost:${PORT}"
-  echo -e "  ${BOLD}Mode:${NC}    production"
-  echo ""
 
-  # In production, serve client/dist as static files from Express
-  # For now, just start the server (client is accessed via proxy or built into server)
-  cd server && exec npx tsx src/index.ts
+  if $FOREGROUND; then
+    # Foreground mode: run tsx directly (blocks terminal, no daemon)
+    echo -e "  ${BOLD}${GREEN}Starting production server (foreground)...${NC}"
+    echo -e "  ─────────────────────────────"
+    echo -e "  ${BOLD}Server:${NC}  http://localhost:${PORT}"
+    echo -e "  ${BOLD}Mode:${NC}    production (foreground, Ctrl+C to stop)"
+    echo ""
+
+    cd server && exec npx tsx src/index.ts
+  else
+    # PM2 daemon mode (default): auto-restart, log rotation, survives terminal close
+    if ! command -v pm2 &>/dev/null && ! npx pm2 --version &>/dev/null 2>&1; then
+      warn "pm2 not found globally. Installing via npx..."
+    fi
+
+    echo -e "  ${BOLD}${GREEN}Starting production server via PM2...${NC}"
+    echo -e "  ─────────────────────────────"
+    echo -e "  ${BOLD}Server:${NC}  http://localhost:${PORT}"
+    echo -e "  ${BOLD}Mode:${NC}    production (PM2 daemon)"
+    echo ""
+
+    npx pm2 start ecosystem.config.cjs
+    ok "Server started as PM2 daemon"
+    echo ""
+    echo -e "  Useful commands:"
+    echo -e "    ${BOLD}npm run logs${NC}     View live logs"
+    echo -e "    ${BOLD}npm run status${NC}   Check process status"
+    echo -e "    ${BOLD}npm stop${NC}         Stop the server"
+    echo -e "    ${BOLD}npm restart${NC}      Rebuild client + restart"
+  fi
 
 else
   # Dev: concurrent server + vite HMR

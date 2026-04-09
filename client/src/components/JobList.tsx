@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import type { Job } from '../types';
-import { Clock, DollarSign, Archive } from 'lucide-react';
+import { Clock, Archive, GitBranch } from 'lucide-react';
 
 interface Props {
   jobs: Job[];
@@ -64,9 +64,14 @@ export function JobList({ jobs, selectedJobId, onSelect, onRename, archivedCount
             onClick={() => onSelect(j.id)}
           >
             <div className="job-card-header">
-              <span className={`badge badge-${j.status}`} style={{ fontSize: 10, padding: '1px 6px', flexShrink: 0 }}>
-                {j.status === 'running' ? <span className="running-indicator">{j.status}</span>
-                  : j.status === 'idle' ? <span className="running-indicator">idle</span>
+              <span className={`badge badge-${j.status}`} style={{ fontSize: 9, padding: '1px 5px', flexShrink: 0 }}>
+                {j.status === 'running'
+                  ? <span className="running-indicator" style={{ fontSize: 9 }}>run</span>
+                  : j.status === 'idle'
+                  ? <span className="running-indicator" style={{ fontSize: 9 }}>idle</span>
+                  : j.status === 'completed' ? 'ok'
+                  : j.status === 'failed' ? 'err'
+                  : j.status === 'queued' ? 'que'
                   : j.status}
               </span>
               {j.mode === 'session' && (
@@ -91,18 +96,14 @@ export function JobList({ jobs, selectedJobId, onSelect, onRename, archivedCount
                   onDoubleClick={e => handleDoubleClick(j, e)}
                   title={j.prompt}
                 >
+                  {j.forkedFrom && <GitBranch size={10} className="job-fork-icon" />}
                   {j.name || j.prompt}
                 </span>
               )}
               <div className="meta" style={{ marginTop: 0, flexShrink: 0 }}>
                 <span className="flex items-center gap-2">
-                  <Clock size={9} /> {timeAgo(j.createdAt)}
+                  <Clock size={9} /> {timeAgo(j.lastInteractionAt ?? j.createdAt)}
                 </span>
-                {j.costUsd != null && (
-                  <span className="flex items-center gap-2">
-                    <DollarSign size={9} /> ${j.costUsd.toFixed(2)}
-                  </span>
-                )}
               </div>
             </div>
             {j.name && (
