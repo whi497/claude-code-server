@@ -32,6 +32,18 @@ ok()    { echo -e "${GREEN}[OK]${NC}   $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 fail()  { echo -e "${RED}[FAIL]${NC} $*"; exit 1; }
 
+# ── Cross-platform sed -i ─────────────────────────────────────────
+# macOS BSD sed requires -i '' while GNU sed requires -i without arg.
+sed_inplace() {
+  if sed --version &>/dev/null 2>&1; then
+    # GNU sed
+    sed -i "$@"
+  else
+    # BSD sed (macOS)
+    sed -i '' "$@"
+  fi
+}
+
 # ── Parse args ───────────────────────────────────────────────────
 MODE="dev"
 INSTALL_ONLY=false
@@ -100,6 +112,13 @@ if [ -f .env ]; then
   ok ".env loaded"
 fi
 
+# ── Helper: ensure .env is not world-readable ─────────────────────
+secure_env() {
+  if [ -f .env ]; then
+    chmod 600 .env
+  fi
+}
+
 # ── 3. Check ANTHROPIC_API_KEY ───────────────────────────────────
 if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
   echo ""
@@ -109,7 +128,8 @@ if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
   echo -e "    ${BOLD}export ANTHROPIC_API_KEY=sk-ant-...${NC}"
   echo -e "    ${BOLD}echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env${NC}"
   echo ""
-  read -rp "  Enter your API key now (or Ctrl+C to abort): " api_key
+  read -rsp "  Enter your API key now (or Ctrl+C to abort): " api_key
+  echo ""  # newline after silent input
   if [ -z "$api_key" ]; then
     fail "API key is required"
   fi
@@ -118,34 +138,21 @@ if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
   read -rp "  Save to .env for next time? [Y/n]: " save_env
   if [[ ! "$save_env" =~ ^[Nn] ]]; then
     if [ -f .env ] && grep -q '^ANTHROPIC_API_KEY=' .env; then
-      sed -i 's|^ANTHROPIC_API_KEY=.*|ANTHROPIC_API_KEY='"$api_key"'|' .env
+      sed_inplace 's|^ANTHROPIC_API_KEY=.*|ANTHROPIC_API_KEY='"$api_key"'|' .env
     else
       echo "ANTHROPIC_API_KEY=$api_key" >> .env
     fi
+    secure_env
     ok "Saved to .env"
   fi
 fi
 ok "ANTHROPIC_API_KEY is set"
 
 # ── 3b. Check ANTHROPIC_BASE_URL ────────────────────────────────
-if [ -z "${ANTHROPIC_BASE_URL:-}" ]; then
-  echo ""
-  info "ANTHROPIC_BASE_URL is not set."
-  read -rp "  Enter base URL (or press Enter for default https://api.anthropic.com): " base_url
-  if [ -n "$base_url" ]; then
-    export ANTHROPIC_BASE_URL="$base_url"
-    # Save to .env
-    if [ -f .env ] && grep -q '^ANTHROPIC_BASE_URL=' .env; then
-      sed -i 's|^ANTHROPIC_BASE_URL=.*|ANTHROPIC_BASE_URL='"$base_url"'|' .env
-    else
-      echo "ANTHROPIC_BASE_URL=$base_url" >> .env
-    fi
-    ok "ANTHROPIC_BASE_URL = ${ANTHROPIC_BASE_URL} (saved to .env)"
-  else
-    ok "ANTHROPIC_BASE_URL using default: https://api.anthropic.com"
-  fi
-else
+if [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
   ok "ANTHROPIC_BASE_URL = ${ANTHROPIC_BASE_URL}"
+else
+  ok "ANTHROPIC_BASE_URL using default (set ANTHROPIC_BASE_URL or add to .env to override)"
 fi
 
 # ── 4. Install dependencies ──────────────────────────────────────
@@ -170,8 +177,7 @@ smart_install() {
   fi
 
   if (cd "$dir" && npm install --no-audit --no-fund); then
-    # Sleep briefly to ensure stamp is strictly newer than any files npm touched
-    sleep 0.1
+    sleep 1
     touch "$dir/node_modules/.install-stamp"
     ok "  ${label} deps installed"
   else
@@ -185,6 +191,14 @@ info "Installing dependencies..."
 smart_install "Root" "."
 smart_install "Server" "server"
 smart_install "Client" "client"
+
+# ── 4b. Fix node-pty spawn-helper permissions ─────────────────────
+# node-pty prebuilds may lose execute permission during npm install.
+# Without +x on spawn-helper, pty.spawn() fails with "posix_spawnp failed".
+if [ -d server/node_modules/node-pty/prebuilds ]; then
+  chmod +x server/node_modules/node-pty/prebuilds/*/spawn-helper 2>/dev/null || true
+  ok "  node-pty spawn-helper permissions fixed"
+fi
 
 # ── 5. Create required directories ───────────────────────────────
 PROJECTS="${PROJECTS_ROOT:-./projects}"
@@ -204,11 +218,20 @@ fi
 echo ""
 PORT="${PORT:-3001}"
 
+# Resolve pm2 command: prefer global, fall back to npx
+resolve_pm2() {
+  if command -v pm2 &>/dev/null; then
+    echo "pm2"
+  else
+    echo "npx pm2"
+  fi
+}
+
 if [ "$MODE" = "prod" ]; then
   # Production: build client, serve static + API from Express
   info "Building client for production..."
   rm -rf client/dist
-  (cd client && npx vite build)
+  (cd client && ./node_modules/.bin/vite build)
   ok "Client built → client/dist/"
 
   echo ""
@@ -221,12 +244,13 @@ if [ "$MODE" = "prod" ]; then
     echo -e "  ${BOLD}Mode:${NC}    production (foreground, Ctrl+C to stop)"
     echo ""
 
-    cd server && exec npx tsx src/index.ts
+    # Graceful shutdown on SIGINT/SIGTERM
+    trap 'echo ""; info "Shutting down..."; kill 0; wait; ok "Server stopped."; exit 0' INT TERM
+
+    cd server && exec ./node_modules/.bin/tsx src/index.ts
   else
     # PM2 daemon mode (default): auto-restart, log rotation, survives terminal close
-    if ! command -v pm2 &>/dev/null; then
-      info "pm2 not found globally, will use npx..."
-    fi
+    PM2_CMD=$(resolve_pm2)
 
     echo -e "  ${BOLD}${GREEN}Starting production server via PM2...${NC}"
     echo -e "  ─────────────────────────────"
@@ -235,19 +259,19 @@ if [ "$MODE" = "prod" ]; then
     echo ""
 
     # Clean up any existing process to ensure a fresh start
-    pm2 delete claude-code-server 2>/dev/null || true
+    $PM2_CMD delete claude-code-server 2>/dev/null || true
 
-    pm2 start ecosystem.config.cjs
+    $PM2_CMD start ecosystem.config.cjs
 
     # Verify the process actually started (not just pm2 registering it)
     sleep 3
-    PM2_PID=$(pm2 pid claude-code-server 2>/dev/null || echo "")
+    PM2_PID=$($PM2_CMD pid claude-code-server 2>/dev/null || echo "")
     if [ -n "$PM2_PID" ] && [ "$PM2_PID" != "0" ]; then
       ok "Server started as PM2 daemon (PID: ${PM2_PID})"
     else
       echo ""
       warn "PM2 process may have crashed on startup. Recent logs:"
-      pm2 logs claude-code-server --lines 20 --nostream 2>/dev/null || true
+      $PM2_CMD logs claude-code-server --lines 20 --nostream 2>/dev/null || true
       echo ""
       fail "Server failed to start. Check the logs above or run: npm run logs"
     fi

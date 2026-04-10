@@ -8,6 +8,10 @@ A web-based UI for running [Claude Code](https://docs.anthropic.com/en/docs/clau
   <img src="https://img.shields.io/badge/TypeScript-strict-blue" alt="TypeScript" />
 </p>
 
+
+
+![Demo](./figs/demo.png)
+
 ## Why?
 
 Claude Code's CLI is powerful but tied to a single terminal session. Claude Code Server turns it into a **multi-project, multi-job web service** with:
