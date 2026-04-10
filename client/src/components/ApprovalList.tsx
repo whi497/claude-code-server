@@ -1,4 +1,5 @@
 import type { ApprovalRequest, Project, Job } from '../types';
+import { renderMarkdown } from './Markdown';
 import { MessageCircleQuestion, ClipboardCheck, Clock } from 'lucide-react';
 
 interface Props {
@@ -33,6 +34,7 @@ const statusLabels: Record<string, string> = {
   approved: 'approved',
   rejected: 'rejected',
   expired: 'expired',
+  discarded: 'discarded',
 };
 
 export function ApprovalList({ approvals, projects, jobs, selectedApprovalId, onSelect }: Props) {
@@ -64,6 +66,7 @@ export function ApprovalList({ approvals, projects, jobs, selectedApprovalId, on
         const Icon = typeIcons[a.type] ?? MessageCircleQuestion;
         const project = projects.find(p => p.id === a.projectId);
         const job = jobs.find(j => j.id === a.jobId);
+        const isPlan = a.type === 'plan_exit';
         return (
           <div
             key={a.id}
@@ -77,7 +80,13 @@ export function ApprovalList({ approvals, projects, jobs, selectedApprovalId, on
                 {statusLabels[a.status]}
               </span>
             </div>
-            <div className="approval-list-content">{a.content}</div>
+            {isPlan ? (
+              <div className="approval-list-plan-preview">
+                {renderMarkdown(a.content)}
+              </div>
+            ) : (
+              <div className="approval-list-content">{a.content}</div>
+            )}
             <div className="approval-list-meta">
               <span>{project?.name ?? 'Unknown'}</span>
               <span className="approval-list-sep">/</span>
@@ -98,6 +107,7 @@ export function ApprovalList({ approvals, projects, jobs, selectedApprovalId, on
         const Icon = typeIcons[a.type] ?? MessageCircleQuestion;
         const project = projects.find(p => p.id === a.projectId);
         const job = jobs.find(j => j.id === a.jobId);
+        const isPlan = a.type === 'plan_exit';
         return (
           <div
             key={a.id}
@@ -111,7 +121,13 @@ export function ApprovalList({ approvals, projects, jobs, selectedApprovalId, on
                 {statusLabels[a.status]}
               </span>
             </div>
-            <div className="approval-list-content">{a.response ? `${a.response}` : a.content}</div>
+            {isPlan && !a.response ? (
+              <div className="approval-list-plan-preview resolved">
+                {renderMarkdown(a.content)}
+              </div>
+            ) : (
+              <div className="approval-list-content">{a.response ? `${a.response}` : a.content}</div>
+            )}
             <div className="approval-list-meta">
               <span>{project?.name ?? 'Unknown'}</span>
               <span className="approval-list-sep">/</span>

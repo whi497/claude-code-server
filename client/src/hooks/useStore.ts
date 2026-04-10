@@ -1,14 +1,17 @@
 import { useEffect, useRef, useCallback, useState, useMemo } from 'react';
-import type { Project, Job, LogEntry, ApprovalRequest } from '../types';
+import type { Project, Job, LogEntry, ApprovalRequest, ImportProgress, ImportResult } from '../types';
 
 type WSEvent =
   | { event: 'init'; data: { projects: Project[]; jobs: Job[]; approvals?: ApprovalRequest[] } }
   | { event: 'project:created'; data: Project }
+  | { event: 'project:updated'; data: Project }
   | { event: 'job:created'; data: Job }
   | { event: 'job:updated'; data: Job }
   | { event: 'job:log'; data: { jobId: string; log: LogEntry } }
   | { event: 'approval:created'; data: ApprovalRequest }
-  | { event: 'approval:updated'; data: ApprovalRequest };
+  | { event: 'approval:updated'; data: ApprovalRequest }
+  | { event: 'import:progress'; data: ImportProgress }
+  | { event: 'import:complete'; data: ImportResult };
 
 interface StoreState {
   projects: Project[];
@@ -16,6 +19,8 @@ interface StoreState {
   jobLogs: Record<string, LogEntry[]>;
   approvals: ApprovalRequest[];
   connected: boolean;
+  importProgress: ImportProgress | null;
+  importResult: ImportResult | null;
 }
 
 export function useStore() {
@@ -25,6 +30,8 @@ export function useStore() {
     jobLogs: {},
     approvals: [],
     connected: false,
+    importProgress: null,
+    importResult: null,
   });
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<any>(null);
@@ -59,6 +66,10 @@ export function useStore() {
           case 'project:created':
             if (s.projects.some(p => p.id === msg.data.id)) return s;
             return { ...s, projects: [...s.projects, msg.data] };
+          case 'project:updated': {
+            const updated = msg.data;
+            return { ...s, projects: s.projects.map(p => p.id === updated.id ? updated : p) };
+          }
           case 'job:created':
             if (s.jobs.some(j => j.id === msg.data.id)) return s;
             return { ...s, jobs: [...s.jobs, msg.data] };
@@ -79,6 +90,10 @@ export function useStore() {
             const updated = msg.data;
             return { ...s, approvals: s.approvals.map(a => a.id === updated.id ? updated : a) };
           }
+          case 'import:progress':
+            return { ...s, importProgress: msg.data };
+          case 'import:complete':
+            return { ...s, importProgress: null, importResult: msg.data };
           default:
             return s;
         }
