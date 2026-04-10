@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { FolderOpen, Plus, MessageCircleQuestion, ClipboardCheck, Search, Download, Archive, ArchiveRestore, MoreHorizontal, ChevronDown, ChevronRight, Check, X, Square } from 'lucide-react';
+import { FolderOpen, Plus, MessageCircleQuestion, ClipboardCheck, Search, Download, Archive, ArchiveRestore, MoreHorizontal, ChevronDown, ChevronRight, Check, X, Square, Sun, Moon } from 'lucide-react';
 import type { Project, Job, ApprovalRequest } from '../types';
 import { api } from '../hooks/api';
 
@@ -22,6 +22,8 @@ interface Props {
   onImport?: () => void;
   onArchiveProject?: (id: string) => void;
   onUnarchiveProject?: (id: string) => void;
+  theme: 'dark' | 'light';
+  onToggleTheme: () => void;
   style?: React.CSSProperties;
 }
 
@@ -34,7 +36,7 @@ export function Sidebar({
   projects, jobs, approvals, pendingApprovals,
   selectedProjectId, selectedJobId, selectedApprovalId, isApprovalView,
   connected, onSelectProject, onSelectJob, onSelectApproval, onSelectApprovalView,
-  onNewProject, onOpenSearch, onImport, onArchiveProject, onUnarchiveProject, style,
+  onNewProject, onOpenSearch, onImport, onArchiveProject, onUnarchiveProject, theme, onToggleTheme, style,
 }: Props) {
   const [contextMenu, setContextMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const [showArchivedProjects, setShowArchivedProjects] = useState(false);
@@ -81,6 +83,13 @@ export function Sidebar({
       <div className="sidebar-header">
         <div className={`dot ${connected ? '' : 'offline'}`} />
         <h1>CLAUDE CODE SERVER</h1>
+        <button
+          className="theme-toggle"
+          onClick={onToggleTheme}
+          title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+        >
+          {theme === 'dark' ? <Sun size={14} /> : <Moon size={14} />}
+        </button>
         {onOpenSearch && (
           <button
             className="cmd-palette-trigger"

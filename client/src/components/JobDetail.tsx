@@ -17,50 +17,11 @@ interface Props {
   onNewJob?: () => void;
   onSelectJob?: (jobId: string) => void;
   allJobs?: Job[];  // for resolving forked-from job names
+  theme?: 'dark' | 'light';
 }
 
 function formatTime(iso: string) {
   return new Date(iso).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
-}
-
-// ── Per-tool border colors (from claude_web's tool-configs.js) ──
-function getToolBorderColor(name: string): string {
-  switch (name) {
-    case 'Bash':
-      return 'var(--tool-border-green, #22c55e)';
-    case 'Write':
-      return 'var(--tool-border-green, #22c55e)';
-    case 'Edit':
-    case 'NotebookEdit':
-      return 'var(--tool-border-amber, #f59e0b)';
-    case 'Read':
-    case 'Grep':
-    case 'Glob':
-    case 'CronCreate':
-    case 'CronDelete':
-    case 'CronList':
-      return 'var(--tool-border-gray, #6b7280)';
-    case 'LSP':
-    case 'WebSearch':
-    case 'WebFetch':
-    case 'AskUserQuestion':
-    case 'EnterPlanMode':
-      return 'var(--tool-border-blue, #3b82f6)';
-    case 'ExitPlanMode':
-      return 'var(--tool-border-indigo, #6366f1)';
-    case 'TaskCreate':
-    case 'TaskUpdate':
-    case 'TaskList':
-    case 'TaskGet':
-    case 'TodoWrite':
-    case 'TodoRead':
-      return 'var(--tool-border-violet, #8b5cf6)';
-    case 'Agent':
-    case 'Skill':
-      return 'var(--tool-border-purple, #a855f7)';
-    default:
-      return 'var(--tool-border-gray, #6b7280)';
-  }
 }
 
 // ── Chat message grouping (ordered parts) ────────────────────
@@ -635,9 +596,9 @@ function ToolBodyDefault({ result }: { result?: string }) {
 
 // ── Thinking toolbar for chat input bar ──────────────────────────
 const EFFORT_LEVELS: { value: EffortLevel; label: string; color: string }[] = [
-  { value: 'low', label: 'Lo', color: '#94a3b8' },
-  { value: 'medium', label: 'Med', color: '#60a5fa' },
-  { value: 'high', label: 'Hi', color: '#a78bfa' },
+  { value: 'low', label: 'Lo', color: 'var(--text-muted)' },
+  { value: 'medium', label: 'Med', color: 'var(--info)' },
+  { value: 'high', label: 'Hi', color: 'var(--idle-fg)' },
 ];
 const BUDGET_PRESETS = [
   { label: '10k', value: 10000 },
@@ -749,7 +710,7 @@ function ToolExpandedModal({ tool, onClose }: {
   onClose: () => void;
 }) {
   const inp = (tool.input && typeof tool.input === 'object' ? tool.input : {}) as Record<string, unknown>;
-  const borderColor = getToolBorderColor(tool.name);
+
   const icon = getToolIcon(tool.name);
   const summary = getToolSummary(tool.name, tool.input);
 
@@ -894,7 +855,7 @@ function ToolExpandedModal({ tool, onClose }: {
     <div className="expanded-overlay" onClick={onClose}>
       <div className="expanded-modal" onClick={e => e.stopPropagation()}>
         {/* Header */}
-        <div className="expanded-header" style={{ borderLeftColor: borderColor }}>
+        <div className="expanded-header">
           <div className="expanded-header-left">
             {icon}
             <span className="expanded-header-name">{tool.name}</span>
@@ -930,7 +891,7 @@ function ToolCallBlock({ tool, isJobRunning, isLastInGroup, depth = 0 }: {
   const [expanded, setExpanded] = useState(isActive || defaultOpen);
   const [showRaw, setShowRaw] = useState(false);
   const [showExpanded, setShowExpanded] = useState(false);
-  const borderColor = getToolBorderColor(tool.name);
+
   const hasChildren = tool.children && tool.children.length > 0;
 
   useEffect(() => {
@@ -1026,7 +987,6 @@ function ToolCallBlock({ tool, isJobRunning, isLastInGroup, depth = 0 }: {
   return (
     <div
       className={`chat-tool-block ${isActive ? 'active' : ''} ${depth > 0 ? 'chat-tool-nested' : ''}`}
-      style={{ borderLeftColor: borderColor }}
     >
       <div className="chat-tool-header" onClick={() => setExpanded(!expanded)}>
         <span className="chat-tool-chevron">
@@ -1322,7 +1282,7 @@ function CollapsibleUserText({ text }: { text: string }) {
 }
 
 // ── Main component ─────────────────────────────────────────────
-export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs }: Props) {
+export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs, theme = 'dark' }: Props) {
   const [tab, setTab] = useState<'chat' | 'terminal' | 'output' | 'files' | 'git' | 'memories' | 'cron'>('chat');
   const [fullLogs, setFullLogs] = useState<LogEntry[]>([]);
   const [files, setFiles] = useState<any[]>([]);
@@ -2015,7 +1975,7 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
 
         {/* ── Terminal tab (persistent — hidden, not unmounted) ── */}
         <div className="terminal-tab-wrapper" style={{ display: tab === 'terminal' ? 'flex' : 'none', flexDirection: 'column', height: '100%' }}>
-          <TerminalPane projectId={projectId} active={tab === 'terminal'} />
+          <TerminalPane projectId={projectId} active={tab === 'terminal'} theme={theme} />
         </div>
 
         {/* ── Output tab (raw logs) ── */}

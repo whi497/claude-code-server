@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useStore } from './hooks/useStore';
 import { useResizable } from './hooks/useResizable';
+import { useTheme } from './hooks/useTheme';
 import { api } from './hooks/api';
 import { Sidebar } from './components/Sidebar';
 import { JobList } from './components/JobList';
@@ -15,6 +16,7 @@ import { Terminal as TerminalIcon, Plus, ClipboardCheck, Search, Archive, Archiv
 
 export default function App() {
   const store = useStore();
+  const { theme, toggleTheme } = useTheme();
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [selectedView, setSelectedView] = useState<'project' | 'approvals'>('project');
@@ -152,6 +154,8 @@ export default function App() {
         onImport={() => setShowImportModal(true)}
         onArchiveProject={handleArchiveProject}
         onUnarchiveProject={handleUnarchiveProject}
+        theme={theme}
+        onToggleTheme={toggleTheme}
         style={{ width: sidebarResize.width, minWidth: sidebarResize.width }}
       />
       <div
@@ -293,7 +297,7 @@ export default function App() {
               />
               <div className="split-right">
                 {selectedJob ? (
-                  <JobDetail job={selectedJob} logs={selectedJobLogs} projectId={selectedProjectId!} onNewJob={() => setShowNewJob(true)} onSelectJob={setSelectedJobId} allJobs={store.jobs} />
+                  <JobDetail job={selectedJob} logs={selectedJobLogs} projectId={selectedProjectId!} onNewJob={() => setShowNewJob(true)} onSelectJob={setSelectedJobId} allJobs={store.jobs} theme={theme} />
                 ) : (
                   <div className="empty-state">
                     {showArchived ? (

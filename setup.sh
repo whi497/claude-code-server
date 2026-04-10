@@ -56,8 +56,16 @@ for arg in "$@"; do
       echo "  PROJECTS_ROOT       Workspace root (default: ./projects)"
       exit 0
       ;;
+    *)
+      fail "Unknown option: $arg (see ./setup.sh --help)"
+      ;;
   esac
 done
+
+# Validate flag combinations
+if $FOREGROUND && [ "$MODE" != "prod" ]; then
+  fail "--fg/--foreground requires --prod"
+fi
 
 echo ""
 echo -e "${BOLD}${CYAN}  Claude Code Server — Setup${NC}"
@@ -109,7 +117,11 @@ if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
   # Optionally save to .env
   read -rp "  Save to .env for next time? [Y/n]: " save_env
   if [[ ! "$save_env" =~ ^[Nn] ]]; then
-    echo "ANTHROPIC_API_KEY=$api_key" > .env
+    if [ -f .env ] && grep -q '^ANTHROPIC_API_KEY=' .env; then
+      sed -i 's|^ANTHROPIC_API_KEY=.*|ANTHROPIC_API_KEY='"$api_key"'|' .env
+    else
+      echo "ANTHROPIC_API_KEY=$api_key" >> .env
+    fi
     ok "Saved to .env"
   fi
 fi
@@ -123,25 +135,49 @@ else
 fi
 
 # ── 4. Install dependencies ──────────────────────────────────────
+# Install deps only if package.json or package-lock.json changed since last install.
+# Usage: smart_install <label> [dir]
+smart_install() {
+  local label="$1"
+  local dir="${2:-.}"
+
+  info "  ${label}..."
+
+  local pkg="$dir/package.json"
+  local lock="$dir/package-lock.json"
+  local stamp="$dir/node_modules/.install-stamp"
+
+  # Skip if stamp exists and is newer than package.json and package-lock.json
+  if [ -f "$stamp" ] \
+     && [ "$stamp" -nt "$pkg" ] \
+     && { [ ! -f "$lock" ] || [ "$stamp" -nt "$lock" ]; }; then
+    ok "  ${label} deps up-to-date (skipped)"
+    return 0
+  fi
+
+  if (cd "$dir" && npm install --no-audit --no-fund); then
+    # Sleep briefly to ensure stamp is strictly newer than any files npm touched
+    sleep 0.1
+    touch "$dir/node_modules/.install-stamp"
+    ok "  ${label} deps installed"
+  else
+    fail "  ${label}: npm install failed (see errors above)"
+  fi
+}
+
 echo ""
 info "Installing dependencies..."
 
-info "  Root..."
-npm install --silent 2>&1 | tail -1 || npm install
-ok "  Root deps installed"
+smart_install "Root" "."
+smart_install "Server" "server"
+smart_install "Client" "client"
 
-info "  Server..."
-(cd server && npm install --silent 2>&1 | tail -1 || npm install)
-ok "  Server deps installed"
-
-info "  Client..."
-(cd client && npm install --silent 2>&1 | tail -1 || npm install)
-ok "  Client deps installed"
-
-# ── 5. Create projects dir ───────────────────────────────────────
+# ── 5. Create required directories ───────────────────────────────
 PROJECTS="${PROJECTS_ROOT:-./projects}"
 mkdir -p "$PROJECTS"
 ok "Projects directory: $PROJECTS"
+mkdir -p logs
+ok "Logs directory: logs/"
 
 # ── 6. Early exit if install-only ────────────────────────────────
 if $INSTALL_ONLY; then
@@ -157,6 +193,7 @@ PORT="${PORT:-3001}"
 if [ "$MODE" = "prod" ]; then
   # Production: build client, serve static + API from Express
   info "Building client for production..."
+  rm -rf client/dist
   (cd client && npx vite build)
   ok "Client built → client/dist/"
 
@@ -173,8 +210,8 @@ if [ "$MODE" = "prod" ]; then
     cd server && exec npx tsx src/index.ts
   else
     # PM2 daemon mode (default): auto-restart, log rotation, survives terminal close
-    if ! command -v pm2 &>/dev/null && ! npx pm2 --version &>/dev/null 2>&1; then
-      warn "pm2 not found globally. Installing via npx..."
+    if ! command -v pm2 &>/dev/null; then
+      info "pm2 not found globally, will use npx..."
     fi
 
     echo -e "  ${BOLD}${GREEN}Starting production server via PM2...${NC}"
@@ -183,8 +220,24 @@ if [ "$MODE" = "prod" ]; then
     echo -e "  ${BOLD}Mode:${NC}    production (PM2 daemon)"
     echo ""
 
-    npx pm2 start ecosystem.config.cjs
-    ok "Server started as PM2 daemon"
+    # Clean up any existing process to ensure a fresh start
+    pm2 delete claude-code-server 2>/dev/null || true
+
+    pm2 start ecosystem.config.cjs
+
+    # Verify the process actually started (not just pm2 registering it)
+    sleep 3
+    PM2_PID=$(pm2 pid claude-code-server 2>/dev/null || echo "")
+    if [ -n "$PM2_PID" ] && [ "$PM2_PID" != "0" ]; then
+      ok "Server started as PM2 daemon (PID: ${PM2_PID})"
+    else
+      echo ""
+      warn "PM2 process may have crashed on startup. Recent logs:"
+      pm2 logs claude-code-server --lines 20 --nostream 2>/dev/null || true
+      echo ""
+      fail "Server failed to start. Check the logs above or run: npm run logs"
+    fi
+
     echo ""
     echo -e "  Useful commands:"
     echo -e "    ${BOLD}npm run logs${NC}     View live logs"

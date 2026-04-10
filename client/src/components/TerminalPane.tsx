@@ -8,11 +8,62 @@ import { RotateCcw, X, Circle } from 'lucide-react';
 interface Props {
   projectId: string;
   active: boolean; // whether this tab is currently visible
+  theme?: 'dark' | 'light';
 }
 
 type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'error';
 
-export function TerminalPane({ projectId, active }: Props) {
+const TERMINAL_DARK = {
+  background: '#0a0e17',
+  foreground: '#e2e8f0',
+  cursor: '#6ee7b7',
+  cursorAccent: '#0a0e17',
+  selectionBackground: 'rgba(110, 231, 183, 0.2)',
+  selectionForeground: '#e2e8f0',
+  black: '#1a2234',
+  red: '#f87171',
+  green: '#6ee7b7',
+  yellow: '#fbbf24',
+  blue: '#60a5fa',
+  magenta: '#c084fc',
+  cyan: '#22d3ee',
+  white: '#e2e8f0',
+  brightBlack: '#4a5d7a',
+  brightRed: '#fca5a5',
+  brightGreen: '#a7f3d0',
+  brightYellow: '#fde68a',
+  brightBlue: '#93c5fd',
+  brightMagenta: '#d8b4fe',
+  brightCyan: '#67e8f9',
+  brightWhite: '#f8fafc',
+};
+
+const TERMINAL_LIGHT = {
+  background: '#faf9f7',
+  foreground: '#2c2c2e',
+  cursor: '#268c62',
+  cursorAccent: '#faf9f7',
+  selectionBackground: 'rgba(38, 140, 98, 0.18)',
+  selectionForeground: '#2c2c2e',
+  black: '#2c2c2e',
+  red: '#d4493a',
+  green: '#268c62',
+  yellow: '#c28419',
+  blue: '#3b7dd8',
+  magenta: '#7555c9',
+  cyan: '#1a8a9e',
+  white: '#e8e6e1',
+  brightBlack: '#9e9a95',
+  brightRed: '#e8685b',
+  brightGreen: '#48b888',
+  brightYellow: '#d9a033',
+  brightBlue: '#5a96e4',
+  brightMagenta: '#9070d6',
+  brightCyan: '#33a0b5',
+  brightWhite: '#faf9f7',
+};
+
+export function TerminalPane({ projectId, active, theme = 'dark' }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<XTerm | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -36,30 +87,7 @@ export function TerminalPane({ projectId, active }: Props) {
         lineHeight: 1.3,
         scrollback: 10000,
         allowProposedApi: true,
-        theme: {
-          background: '#0a0e17',
-          foreground: '#e2e8f0',
-          cursor: '#6ee7b7',
-          cursorAccent: '#0a0e17',
-          selectionBackground: 'rgba(110, 231, 183, 0.2)',
-          selectionForeground: '#e2e8f0',
-          black: '#1a2234',
-          red: '#f87171',
-          green: '#6ee7b7',
-          yellow: '#fbbf24',
-          blue: '#60a5fa',
-          magenta: '#c084fc',
-          cyan: '#22d3ee',
-          white: '#e2e8f0',
-          brightBlack: '#4a5d7a',
-          brightRed: '#fca5a5',
-          brightGreen: '#a7f3d0',
-          brightYellow: '#fde68a',
-          brightBlue: '#93c5fd',
-          brightMagenta: '#d8b4fe',
-          brightCyan: '#67e8f9',
-          brightWhite: '#f8fafc',
-        },
+        theme: theme === 'light' ? TERMINAL_LIGHT : TERMINAL_DARK,
       });
 
       const fitAddon = new FitAddon();
@@ -221,6 +249,13 @@ export function TerminalPane({ projectId, active }: Props) {
       setTimeout(() => xtermRef.current?.focus(), 100);
     }
   }, [active]);
+
+  // Live-update terminal theme when app theme changes
+  useEffect(() => {
+    if (xtermRef.current) {
+      xtermRef.current.options.theme = theme === 'light' ? TERMINAL_LIGHT : TERMINAL_DARK;
+    }
+  }, [theme]);
 
   const handleReconnect = () => {
     if (xtermRef.current) {
