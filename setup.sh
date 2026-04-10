@@ -129,7 +129,21 @@ ok "ANTHROPIC_API_KEY is set"
 
 # ── 3b. Check ANTHROPIC_BASE_URL ────────────────────────────────
 if [ -z "${ANTHROPIC_BASE_URL:-}" ]; then
-  info "ANTHROPIC_BASE_URL not set (will use default: https://api.anthropic.com)"
+  echo ""
+  info "ANTHROPIC_BASE_URL is not set."
+  read -rp "  Enter base URL (or press Enter for default https://api.anthropic.com): " base_url
+  if [ -n "$base_url" ]; then
+    export ANTHROPIC_BASE_URL="$base_url"
+    # Save to .env
+    if [ -f .env ] && grep -q '^ANTHROPIC_BASE_URL=' .env; then
+      sed -i 's|^ANTHROPIC_BASE_URL=.*|ANTHROPIC_BASE_URL='"$base_url"'|' .env
+    else
+      echo "ANTHROPIC_BASE_URL=$base_url" >> .env
+    fi
+    ok "ANTHROPIC_BASE_URL = ${ANTHROPIC_BASE_URL} (saved to .env)"
+  else
+    ok "ANTHROPIC_BASE_URL using default: https://api.anthropic.com"
+  fi
 else
   ok "ANTHROPIC_BASE_URL = ${ANTHROPIC_BASE_URL}"
 fi
