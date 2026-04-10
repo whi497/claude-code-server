@@ -87,19 +87,48 @@ echo ""
 # ── 1. Check prerequisites ───────────────────────────────────────
 info "Checking prerequisites..."
 
-# Node.js
+# Helper: load nvm if installed but not yet sourced
+load_nvm() {
+  export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+  [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+}
+
+# Helper: install Node.js via nvm
+install_node_via_nvm() {
+  info "Installing nvm..."
+  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
+  load_nvm
+  if ! command -v nvm &>/dev/null; then
+    fail "nvm installation failed — install Node.js v20+ manually: https://nodejs.org"
+  fi
+  ok "nvm installed"
+  info "Installing Node.js v20 via nvm..."
+  nvm install 20
+  nvm use 20
+}
+
+# Node.js — auto-install via nvm if missing or too old
+load_nvm
 if ! command -v node &>/dev/null; then
-  fail "Node.js not found. Install it: https://nodejs.org (v18+)"
+  warn "Node.js not found."
+  info "Will install Node.js v20 automatically via nvm..."
+  install_node_via_nvm
 fi
 NODE_VER=$(node -v | sed 's/v//' | cut -d. -f1)
 if [ "$NODE_VER" -lt 18 ]; then
-  fail "Node.js v18+ required (found v$(node -v))"
+  warn "Node.js v18+ required (found $(node -v))."
+  info "Upgrading to Node.js v20 via nvm..."
+  install_node_via_nvm
+  NODE_VER=$(node -v | sed 's/v//' | cut -d. -f1)
+  if [ "$NODE_VER" -lt 18 ]; then
+    fail "Node.js upgrade failed (still $(node -v)). Install v20+ manually: https://nodejs.org"
+  fi
 fi
 ok "Node.js $(node -v)"
 
-# npm
+# npm (should come with Node.js)
 if ! command -v npm &>/dev/null; then
-  fail "npm not found"
+  fail "npm not found (should be bundled with Node.js)"
 fi
 ok "npm $(npm -v)"
 
