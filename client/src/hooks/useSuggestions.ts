@@ -30,20 +30,28 @@ export interface SDKSlashCommand {
  * Static fallback SDK commands shown when no live SDK session is available.
  * Used in: New Job modal, completed/failed job continuation input,
  * and as a fallback when live SDK command fetch fails.
+ *
+ * IMPORTANT: Only include commands actually supported by the Agent SDK.
+ * CLI-only commands (model, config, memory, permissions, mcp, clear, help, bug)
+ * are NOT supported and will produce "Unknown skill" errors.
+ * Server-handled commands (model, help) are injected separately.
  */
 export const FALLBACK_SDK_COMMANDS: SDKSlashCommand[] = [
   { name: 'compact', description: 'Compact conversation to reduce context', argumentHint: '<instructions>' },
-  { name: 'model', description: 'Switch the AI model', argumentHint: '<model-name>' },
-  { name: 'config', description: 'View or change configuration', argumentHint: '' },
-  { name: 'memory', description: 'Edit CLAUDE.md memory files', argumentHint: '' },
   { name: 'review', description: 'Review a pull request', argumentHint: '<pr-url>' },
-  { name: 'pr-comments', description: 'View and address PR comments', argumentHint: '' },
   { name: 'init', description: 'Initialize project with CLAUDE.md', argumentHint: '' },
   { name: 'cost', description: 'Show token usage and costs', argumentHint: '' },
-  { name: 'permissions', description: 'View and manage tool permissions', argumentHint: '' },
-  { name: 'mcp', description: 'Manage MCP servers', argumentHint: '' },
   { name: 'context', description: 'Show context window usage', argumentHint: '' },
-  { name: 'bug', description: 'Report a bug', argumentHint: '<description>' },
+];
+
+/**
+ * Commands handled server-side via SDK programmatic API (not as slash commands).
+ * These are CLI-only commands that the SDK doesn't support as slash commands,
+ * but the server implements via queryHandle methods (setModel, supportedModels, etc.)
+ */
+export const SERVER_HANDLED_COMMANDS: SDKSlashCommand[] = [
+  { name: 'model', description: 'Switch the AI model', argumentHint: '' },
+  { name: 'help', description: 'Show available commands', argumentHint: '' },
 ];
 
 export interface UseSuggestionsOptions {
@@ -54,6 +62,7 @@ export interface UseSuggestionsOptions {
   commands?: CommandDef[];
   sdkCommands?: SDKSlashCommand[];       // from SDK session
   onSdkCommand?: (fullCommand: string) => void;  // called with e.g. "/compact summary" to send as message
+  onModelPicker?: () => void;            // called when /model is selected — opens model picker UI
   enabled?: boolean;
 }
 
@@ -145,7 +154,7 @@ function flattenFileTree(nodes: FileNode[], maxItems = 50): SuggestionItem[] {
 // ── Main hook ────────────────────────────────────────────────
 
 export function useSuggestions(options: UseSuggestionsOptions): UseSuggestionsReturn {
-  const { inputRef, value, setValue, projectId, commands = [], sdkCommands = [], onSdkCommand, enabled = true } = options;
+  const { inputRef, value, setValue, projectId, commands = [], sdkCommands = [], onSdkCommand, onModelPicker, enabled = true } = options;
 
   const [isOpen, setIsOpen] = useState(false);
   const [items, setItems] = useState<SuggestionItem[]>([]);
@@ -158,7 +167,7 @@ export function useSuggestions(options: UseSuggestionsOptions): UseSuggestionsRe
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const triggerRef = useRef<TriggerInfo | null>(null);
 
-  // Available commands: local (execute JS) + SDK (sent as message to session)
+  // Available commands: local (execute JS) + server-handled + SDK (sent as message to session)
   const availableCommands = useMemo(() => {
     const localItems: SuggestionItem[] = commands.filter(c => c.available()).map(c => ({
       id: c.id,
@@ -167,6 +176,17 @@ export function useSuggestions(options: UseSuggestionsOptions): UseSuggestionsRe
       icon: 'command' as const,
       type: 'command' as const,
     }));
+
+    // Server-handled commands (model, help) — only shown when an active session exists
+    const serverItems: SuggestionItem[] = onSdkCommand
+      ? SERVER_HANDLED_COMMANDS.map(c => ({
+          id: `sdk:${c.name}`,
+          label: `/${c.name}`,
+          description: c.description + (c.argumentHint ? ` ${c.argumentHint}` : ''),
+          icon: 'sdk-command' as const,
+          type: 'sdk-command' as const,
+        }))
+      : [];
 
     // SDK commands — filtered to exclude ones that don't make sense headlessly
     const SKIP_SDK_COMMANDS = new Set([
@@ -178,8 +198,9 @@ export function useSuggestions(options: UseSuggestionsOptions): UseSuggestionsRe
       'remote-control', 'setup-bedrock', 'add-dir', 'resume',
     ]);
     const localIds = new Set(commands.map(c => c.id));
+    const serverNames = new Set(SERVER_HANDLED_COMMANDS.map(c => c.name));
     const sdkItems: SuggestionItem[] = sdkCommands
-      .filter(c => !SKIP_SDK_COMMANDS.has(c.name) && !localIds.has(c.name))
+      .filter(c => !SKIP_SDK_COMMANDS.has(c.name) && !localIds.has(c.name) && !serverNames.has(c.name))
       .map(c => ({
         id: `sdk:${c.name}`,
         label: `/${c.name}`,
@@ -188,8 +209,8 @@ export function useSuggestions(options: UseSuggestionsOptions): UseSuggestionsRe
         type: 'sdk-command' as const,
       }));
 
-    return [...localItems, ...sdkItems];
-  }, [commands, sdkCommands]);
+    return [...localItems, ...serverItems, ...sdkItems];
+  }, [commands, sdkCommands, onSdkCommand]);
 
   // Dismiss the dropdown
   const dismiss = useCallback(() => {
@@ -362,11 +383,19 @@ export function useSuggestions(options: UseSuggestionsOptions): UseSuggestionsRe
         cmd.execute();
       }
     } else if (item.type === 'sdk-command') {
+      // Intercept /model — open picker UI instead of sending a message
+      if (item.id === 'sdk:model' && onModelPicker) {
+        setValue('');
+        onModelPicker();
+        dismiss();
+        return;
+      }
       // SDK slash command — send as message to the session
       // The label is e.g. "/compact", which the SDK CLI processes directly
       if (onSdkCommand) {
         // Check if the command takes arguments (has argumentHint)
-        const sdkCmd = sdkCommands.find(c => `sdk:${c.name}` === item.id);
+        const sdkCmd = sdkCommands.find(c => `sdk:${c.name}` === item.id)
+          || SERVER_HANDLED_COMMANDS.find(c => `sdk:${c.name}` === item.id);
         if (sdkCmd?.argumentHint) {
           // Replace the typed text with the full command, let user type args
           const before = value.slice(0, trigger.startPos);

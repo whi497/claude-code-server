@@ -42,16 +42,23 @@ export default function App() {
   });
 
   // Cmd+K / Ctrl+K hotkey for command palette
+  // Cmd+N / Ctrl+N hotkey for new job
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
         e.preventDefault();
         setShowCommandPalette(prev => !prev);
       }
+      if ((e.metaKey || e.ctrlKey) && e.key === 'n') {
+        e.preventDefault();
+        if (selectedProjectId) {
+          setShowNewJob(true);
+        }
+      }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, []);
+  }, [selectedProjectId]);
 
   const selectedProject = store.projects.find(p => p.id === selectedProjectId);
   const projectJobs = store.jobs

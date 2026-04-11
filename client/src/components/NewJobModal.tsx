@@ -1,11 +1,12 @@
 import { useState, useRef, useMemo } from 'react';
-import { Paperclip } from 'lucide-react';
+import { Paperclip, Cpu, MessageSquare } from 'lucide-react';
 import { api } from '../hooks/api';
 import { useSuggestions, type CommandDef, FALLBACK_SDK_COMMANDS } from '../hooks/useSuggestions';
 import { useAttachments } from '../hooks/useAttachments';
 import { SuggestionDropdown } from './SuggestionDropdown';
 import { AttachmentPreview } from './AttachmentPreview';
-import type { Job, ThinkingConfig, EffortLevel } from '../types';
+import { ThinkingToolbar, ModelPickerModal, getModelDisplayName } from './PromptControls';
+import type { Job, ThinkingConfig, ModelOption } from '../types';
 
 interface Props {
   projectId: string;
@@ -13,25 +14,18 @@ interface Props {
   onCreated: (j: Job) => void;
 }
 
-const THINKING_BUDGET_PRESETS = [
-  { label: '10k', value: 10000 },
-  { label: '50k', value: 50000 },
-  { label: '100k', value: 100000 },
-  { label: '200k', value: 200000 },
-];
 const DEFAULT_THINKING_BUDGET = 10000;
-const EFFORT_LEVELS: { value: EffortLevel; label: string }[] = [
-  { value: 'low', label: 'Low' },
-  { value: 'medium', label: 'Medium' },
-  { value: 'high', label: 'High' },
-];
 
 export function NewJobModal({ projectId, onClose, onCreated }: Props) {
   const [prompt, setPrompt] = useState('');
   const [sessionMode, setSessionMode] = useState(false);
   const [thinkingEnabled, setThinkingEnabled] = useState(false);
   const [thinkingBudget, setThinkingBudget] = useState(DEFAULT_THINKING_BUDGET);
-  const [thinkingEffort, setThinkingEffort] = useState<EffortLevel>('medium');
+  const [thinkingEffort, setThinkingEffort] = useState<'low' | 'medium' | 'high'>('medium');
+  const [selectedModel, setSelectedModel] = useState('default');
+  const [availableModels, setAvailableModels] = useState<ModelOption[]>([]);
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const [modelPickerLoading, setModelPickerLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -55,8 +49,19 @@ export function NewJobModal({ projectId, onClose, onCreated }: Props) {
     projectId,
     commands,
     sdkCommands: FALLBACK_SDK_COMMANDS,
-    // No onSdkCommand — commands will be inserted as text into the prompt
   });
+
+  const handleOpenModelPicker = async () => {
+    setModelPickerOpen(true);
+    setModelPickerLoading(true);
+    try {
+      setAvailableModels(await api.getAvailableModels());
+    } catch {
+      setAvailableModels([]);
+    } finally {
+      setModelPickerLoading(false);
+    }
+  };
 
   const handleSubmit = async () => {
     if (!prompt.trim() || suggestions.isOpen) return;
@@ -71,6 +76,7 @@ export function NewJobModal({ projectId, onClose, onCreated }: Props) {
         prompt.trim(),
         sessionMode ? 'session' : undefined,
         thinking,
+        selectedModel,
         attach.attachments.length > 0 ? attach.attachments : undefined,
       );
       attach.clearAll();
@@ -105,7 +111,6 @@ export function NewJobModal({ projectId, onClose, onCreated }: Props) {
             onPaste={attach.handlePaste}
             onKeyDown={e => {
               suggestions.handleKeyDown(e);
-              // Enter to submit, Shift+Enter for new line
               if (!e.defaultPrevented && e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
                 handleSubmit();
@@ -132,93 +137,45 @@ export function NewJobModal({ projectId, onClose, onCreated }: Props) {
           )}
         </div>
 
-        {/* Attachment previews */}
+        <div className="input-toolbar-row" style={{ marginTop: 10, flexWrap: 'wrap' }}>
+          <button
+            type="button"
+            className={`thinking-toolbar-toggle ${sessionMode ? 'active' : ''}`}
+            onClick={() => setSessionMode(prev => !prev)}
+            title={sessionMode ? 'Start as persistent session' : 'Start as regular job'}
+          >
+            <MessageSquare size={13} />
+            <span>{sessionMode ? 'Session' : 'Job'}</span>
+          </button>
+          <ThinkingToolbar
+            enabled={thinkingEnabled}
+            effort={thinkingEffort}
+            budget={thinkingBudget}
+            onToggle={setThinkingEnabled}
+            onEffortChange={setThinkingEffort}
+            onBudgetChange={setThinkingBudget}
+          />
+          <button
+            type="button"
+            className="model-selector-btn"
+            onClick={handleOpenModelPicker}
+            title="Select model"
+          >
+            <Cpu size={13} />
+            <span>{getModelDisplayName(selectedModel, availableModels)}</span>
+          </button>
+        </div>
+        <p className="text-sm text-muted" style={{ marginTop: 8, marginBottom: 0 }}>
+          Session keeps Claude alive after each turn. Jobs still auto-promote to session when cron tasks are detected.
+        </p>
+
         <AttachmentPreview attachments={attach.attachments} onRemove={attach.removeAttachment} />
         {attach.error && (
           <p className="attachment-error">{attach.error}</p>
         )}
 
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8 }}>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
-            <input
-              type="checkbox"
-              checked={sessionMode}
-              onChange={e => setSessionMode(e.target.checked)}
-              style={{ accentColor: 'var(--accent)' }}
-            />
-            <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>Start as persistent session</span>
-            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-              — auto-enabled when cron job detected
-            </span>
-          </label>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
-                <input
-                  type="checkbox"
-                  checked={thinkingEnabled}
-                  onChange={e => setThinkingEnabled(e.target.checked)}
-                  style={{ accentColor: 'var(--accent)' }}
-                />
-                <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>Extended thinking</span>
-              </label>
-              {thinkingEnabled && (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 4 }}>
-                  <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Effort:</span>
-                  {EFFORT_LEVELS.map(e => (
-                    <button
-                      key={e.value}
-                      type="button"
-                      className={`btn ${thinkingEffort === e.value ? 'btn-primary' : ''}`}
-                      style={{ fontSize: 11, padding: '2px 8px', minWidth: 0 }}
-                      onClick={() => setThinkingEffort(e.value)}
-                    >
-                      {e.label}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-            {thinkingEnabled && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginLeft: 28 }}>
-                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Budget:</span>
-                {THINKING_BUDGET_PRESETS.map(p => (
-                  <button
-                    key={p.value}
-                    type="button"
-                    className={`btn ${thinkingBudget === p.value ? 'btn-primary' : ''}`}
-                    style={{ fontSize: 11, padding: '2px 8px', minWidth: 0 }}
-                    onClick={() => setThinkingBudget(p.value)}
-                  >
-                    {p.label}
-                  </button>
-                ))}
-                <input
-                  type="number"
-                  value={thinkingBudget}
-                  onChange={e => {
-                    const v = parseInt(e.target.value, 10);
-                    if (!isNaN(v) && v > 0) setThinkingBudget(v);
-                  }}
-                  style={{
-                    width: 72,
-                    fontSize: 11,
-                    padding: '2px 6px',
-                    background: 'var(--bg-secondary)',
-                    border: '1px solid var(--border)',
-                    borderRadius: 4,
-                    color: 'var(--text-primary)',
-                  }}
-                  title="Custom budget tokens"
-                />
-                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>tokens</span>
-              </div>
-            )}
-          </div>
-        </div>
         {error && <p style={{ color: 'var(--danger)', fontSize: 12, marginTop: 8 }}>{error}</p>}
         <div className="actions">
-          {/* Hidden file input for the attach button */}
           <input
             ref={attach.fileInputRef as React.RefObject<HTMLInputElement>}
             type="file"
@@ -227,7 +184,7 @@ export function NewJobModal({ projectId, onClose, onCreated }: Props) {
             style={{ display: 'none' }}
             onChange={e => {
               if (e.target.files) attach.addFiles(e.target.files);
-              e.target.value = ''; // reset so same file can be re-selected
+              e.target.value = '';
             }}
           />
           <button className="btn btn-attach" onClick={attach.openFilePicker} title="Attach images" type="button">
@@ -240,6 +197,20 @@ export function NewJobModal({ projectId, onClose, onCreated }: Props) {
           </button>
         </div>
       </div>
+
+      <ModelPickerModal
+        isOpen={modelPickerOpen}
+        onClose={() => setModelPickerOpen(false)}
+        models={availableModels}
+        loading={modelPickerLoading}
+        currentValue={selectedModel}
+        title="Select Model"
+        emptyMessage="No models available."
+        onSelect={(value) => {
+          setSelectedModel(value);
+          setModelPickerOpen(false);
+        }}
+      />
     </div>
   );
 }

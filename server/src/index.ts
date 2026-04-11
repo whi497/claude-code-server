@@ -455,7 +455,60 @@ function stripAttachmentData(attachments?: Attachment[]): Attachment[] | undefin
 // is closed on result:success so the process exits. For mode='session',
 // the process stays alive in 'idle' and accepts follow-up messages.
 // Cron detection can auto-promote a job → session mid-execution.
-async function runJob(job: Job) {
+interface RunJobOptions {
+  activateOnly?: boolean;
+}
+
+type ModelOption = {
+  value: string;
+  displayName: string;
+  description: string;
+};
+
+const DEFAULT_MODEL_OPTION: ModelOption = {
+  value: 'default',
+  displayName: 'Default',
+  description: 'Use the Claude Code default model for new turns.',
+};
+
+const FALLBACK_MODEL_OPTIONS: ModelOption[] = [
+  DEFAULT_MODEL_OPTION,
+  { value: 'sonnet', displayName: 'Sonnet', description: 'Balanced speed and capability for most coding work.' },
+  { value: 'opus', displayName: 'Opus', description: 'Highest capability for more complex reasoning and coding tasks.' },
+  { value: 'haiku', displayName: 'Haiku', description: 'Fastest lightweight model for simpler or lower-latency work.' },
+];
+
+function normalizeJobModel(model: unknown): string | undefined {
+  if (typeof model !== 'string') return undefined;
+  const trimmed = model.trim();
+  if (!trimmed || trimmed === 'default') return undefined;
+  return trimmed;
+}
+
+function ensureModelOption(models: ModelOption[], model?: string): ModelOption[] {
+  if (!model || models.some(m => m.value === model)) return models;
+  return [{ value: model, displayName: model, description: 'Previously selected model.' }, ...models];
+}
+
+function withDefaultModel(models: ModelOption[]): ModelOption[] {
+  return models.some(m => m.value === DEFAULT_MODEL_OPTION.value)
+    ? models
+    : [DEFAULT_MODEL_OPTION, ...models];
+}
+
+async function getModelOptions(session?: { queryHandle?: any }, selectedModel?: string): Promise<ModelOption[]> {
+  if (session?.queryHandle?.supportedModels) {
+    try {
+      const models = await session.queryHandle.supportedModels();
+      return withDefaultModel(ensureModelOption(models, selectedModel));
+    } catch {
+      // Fall through to static fallback list
+    }
+  }
+  return ensureModelOption(FALLBACK_MODEL_OPTIONS, selectedModel);
+}
+
+async function runJob(job: Job, runOptions: RunJobOptions = {}) {
   const project = projects.find(p => p.id === job.projectId);
   if (!project) {
     job.status = 'failed';
@@ -478,6 +531,7 @@ async function runJob(job: Job) {
   const channel = createMessageChannel();
   const session: { abort: AbortController; channel?: any; queryHandle?: any; cachedCommands?: any[] } = { abort: abortController, channel };
   activeQueries.set(job.id, session);
+  const activateOnly = runOptions.activateOnly === true;
 
   const addLog = (entry: Omit<LogEntry, 'timestamp'>) => {
     const log: LogEntry = { ...entry, timestamp: new Date().toISOString() };
@@ -485,11 +539,22 @@ async function runJob(job: Job) {
     broadcast('job:log', { jobId: job.id, log });
   };
 
+  const markIdle = (message?: string) => {
+    clearIdleTimer(job.id);
+    job.status = 'idle';
+    job.idleDeadline = undefined;
+    job.updatedAt = new Date().toISOString();
+    if (message) addLog({ type: 'system', content: message });
+    broadcast('job:updated', job);
+    saveState();
+  };
+
   try {
     const opts: Parameters<typeof query>[0]['options'] = {
       cwd,
       abortController,
       pathToClaudeCodeExecutable: CLAUDE_CLI_PATH,
+      ...(job.model ? { model: job.model } : {}),
       allowedTools: ['Read', 'Edit', 'Write', 'Bash', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode'],
       disallowedTools: [],
       // No permissionMode: 'bypassPermissions' — canUseTool handles all permissions
@@ -518,24 +583,38 @@ async function runJob(job: Job) {
     }
 
     const isSession = job.mode === 'session';
-    if (job.forkedFrom) {
+    if (activateOnly) {
+      addLog({ type: 'system', content: `${job.sessionId ? 'Reactivating' : 'Starting'} session in ${cwd}` });
+    } else if (job.forkedFrom) {
       addLog({ type: 'system', content: job.forkedFrom.turnIndex === 0 && !job.sessionId
         ? `── Forked: edited first message ──`
         : `── Forked after assistant turn ${job.forkedFrom.turnIndex} ──` });
     } else {
       addLog({ type: 'system', content: `Starting ${isSession ? 'session' : 'job'} in ${cwd}` });
     }
-    addLog({ type: 'user', content: job.prompt, ...(job.attachments?.length ? { meta: { attachments: job.attachments.map(a => ({ filename: a.filename, mediaType: a.mediaType, size: a.size })) } } : {}) });
+    if (!activateOnly) {
+      addLog({ type: 'user', content: job.prompt, ...(job.attachments?.length ? { meta: { attachments: job.attachments.map(a => ({ filename: a.filename, mediaType: a.mediaType, size: a.size })) } } : {}) });
 
-    // Push the first user message into the generator (with image content blocks if attachments present)
-    channel.push({
-      type: 'user' as const,
-      message: { role: 'user' as const, content: buildUserContent(job.prompt, job.attachments) } as any,
-    });
+      // Push the first user message into the generator (with image content blocks if attachments present)
+      channel.push({
+        type: 'user' as const,
+        message: { role: 'user' as const, content: buildUserContent(job.prompt, job.attachments) } as any,
+      });
+    }
 
     // Process messages — loop stays alive until generator is closed or aborted
     const queryHandle = query({ prompt: channel.generator, options: opts });
     session.queryHandle = queryHandle;
+    if (activateOnly && queryHandle.initializationResult) {
+      queryHandle.initializationResult()
+        .then(() => {
+          if (activeQueries.get(job.id) !== session || job.status === 'idle') return;
+          markIdle(job.sessionId
+            ? 'Session ready — waiting for your next message'
+            : 'Session ready — waiting for your first message');
+        })
+        .catch(() => {});
+    }
     for await (const message of queryHandle) {
       const msg = message as any;
 
@@ -543,6 +622,9 @@ async function runJob(job: Job) {
       if (msg.type === 'system' && msg.subtype === 'init') {
         job.sessionId = msg.session_id;
         addLog({ type: 'system', content: `Session: ${msg.session_id} | Model: ${msg.model}` });
+        if (activateOnly && job.status !== 'idle') {
+          markIdle('Session ready — waiting for your next message');
+        }
 
         // Proactively fetch full command list from SDK and cache it
         if (session.queryHandle?.supportedCommands) {
@@ -563,10 +645,7 @@ async function runJob(job: Job) {
       // Session state changes (forward-compat with future SDK versions)
       if (msg.type === 'system' && msg.subtype === 'session_state_changed') {
         if (msg.state === 'idle' && job.status !== 'idle') {
-          job.status = 'idle';
-          job.updatedAt = new Date().toISOString();
-          broadcast('job:updated', job);
-          saveState();
+          markIdle();
         } else if (msg.state === 'running' && job.status !== 'running') {
           job.status = 'running';
           job.updatedAt = new Date().toISOString();
@@ -717,13 +796,12 @@ async function runJob(job: Job) {
 
           if (job.mode === 'session') {
             // Session: stay alive indefinitely, wait for next message
-            job.status = 'idle';
             addLog({ type: 'result', content: msg.result ?? 'Turn complete' });
-            saveState();
+            markIdle();
           } else {
             // Regular job: enter idle with grace period (auto-complete after 5 min)
-            job.status = 'idle';
             addLog({ type: 'result', content: msg.result ?? 'Done — idle for 5 min (send follow-up or pin as session)' });
+            job.status = 'idle';
             startIdleTimer(job);
             saveState();
           }
@@ -839,17 +917,38 @@ app.post('/api/projects', async (req, res) => {
   const projectPath = customPath
     ? path.resolve(customPath)
     : path.join(PROJECTS_ROOT, name.replace(/[^a-zA-Z0-9_-]/g, '_'));
+  const maxOrder = projects
+    .filter(p => !p.archived)
+    .reduce((max, p) => Math.max(max, p.sortOrder ?? -1), -1);
   const project: Project = {
     id,
     name,
     path: projectPath,
     createdAt: new Date().toISOString(),
+    sortOrder: maxOrder + 1,
   };
   await fsp.mkdir(project.path, { recursive: true });
   projects.push(project);
   saveState();
   broadcast('project:created', project);
   res.status(201).json(project);
+});
+
+app.put('/api/projects/reorder', (req, res) => {
+  const { orderedIds } = req.body;
+  if (!Array.isArray(orderedIds)) {
+    return res.status(400).json({ error: 'orderedIds must be an array' });
+  }
+  const orderMap = new Map(orderedIds.map((id: string, i: number) => [id, i]));
+  for (const project of projects) {
+    const order = orderMap.get(project.id);
+    if (order !== undefined) {
+      project.sortOrder = order;
+    }
+  }
+  saveState();
+  broadcast('projects:reordered', { projects });
+  res.json({ ok: true });
 });
 
 app.delete('/api/projects/:id', (req, res) => {
@@ -889,7 +988,7 @@ app.patch('/api/jobs/:id', (req, res) => {
 });
 
 app.post('/api/jobs', (req, res) => {
-  const { projectId, prompt, mode, thinking, attachments: rawAttachments } = req.body;
+  const { projectId, prompt, mode, thinking, model, attachments: rawAttachments } = req.body;
   if (!projectId || !prompt) return res.status(400).json({ error: 'projectId and prompt required' });
   if (!projects.find(p => p.id === projectId)) return res.status(404).json({ error: 'project not found' });
 
@@ -912,6 +1011,7 @@ app.post('/api/jobs', (req, res) => {
     id: uuid(),
     projectId,
     prompt,
+    ...(normalizeJobModel(model) ? { model: normalizeJobModel(model) } : {}),
     ...(validatedAttachments ? { attachments: validatedAttachments } : {}),
     status: 'queued',
     mode: mode === 'session' ? 'session' : 'job',
@@ -950,11 +1050,11 @@ app.put('/api/jobs/:id/thinking', (req, res) => {
 });
 
 // Resume a completed/failed job OR send message to live session
-app.post('/api/jobs/:id/continue', (req, res) => {
+app.post('/api/jobs/:id/continue', async (req, res) => {
   const job = jobs.find(j => j.id === req.params.id);
   if (!job) return res.status(404).json({ error: 'not found' });
 
-  const { prompt, thinking, attachments: rawAttachments } = req.body;
+  const { prompt, thinking, model, attachments: rawAttachments } = req.body;
   // Update thinking config if provided with the continue request
   if (thinking !== undefined) {
     if (thinking && thinking.type === 'enabled' && typeof thinking.budgetTokens === 'number' && thinking.budgetTokens > 0) {
@@ -963,6 +1063,9 @@ app.post('/api/jobs/:id/continue', (req, res) => {
     } else {
       job.thinking = undefined;
     }
+  }
+  if (model !== undefined) {
+    job.model = normalizeJobModel(model);
   }
   const message = prompt ?? 'Continue from where you left off.';
 
@@ -975,6 +1078,87 @@ app.post('/api/jobs/:id/continue', (req, res) => {
   }
 
   const attachmentMeta = continueAttachments?.map(a => ({ filename: a.filename, mediaType: a.mediaType, size: a.size }));
+
+  // ── Intercept CLI-only slash commands handled via SDK API ──
+  // These commands are not recognized by the SDK's slash command system
+  // and must be handled programmatically via queryHandle methods.
+  // IMPORTANT: Must intercept BEFORE falling through to the channel push,
+  // even when queryHandle isn't ready yet (race condition at session start).
+  const SERVER_ONLY_COMMANDS = new Set(['model', 'help']);
+  const trimmedMessage = message.trim();
+  const slashMatch = trimmedMessage.match(/^\/(\S+)(?:\s+(.*))?$/);
+  if (slashMatch && (job.status === 'idle' || job.status === 'running')) {
+    const cmdName = slashMatch[1].toLowerCase();
+    const cmdArgs = slashMatch[2]?.trim() || '';
+
+    if (SERVER_ONLY_COMMANDS.has(cmdName)) {
+      const session = activeQueries.get(job.id);
+
+      // Helper to add log entries
+      const addCmdLog = (entry: Omit<LogEntry, 'timestamp'>) => {
+        const log: LogEntry = { ...entry, timestamp: new Date().toISOString() };
+        job.logs.push(log);
+        broadcast('job:log', { jobId: job.id, log });
+      };
+
+      addCmdLog({ type: 'user', content: trimmedMessage });
+
+      // Wait for queryHandle if session exists but handle not ready yet (race at startup)
+      let queryHandle = session?.queryHandle;
+      if (session && !queryHandle) {
+        for (let i = 0; i < 10; i++) {
+          await new Promise(r => setTimeout(r, 500));
+          queryHandle = activeQueries.get(job.id)?.queryHandle;
+          if (queryHandle) break;
+        }
+      }
+
+      if (cmdName === 'model') {
+        if (!queryHandle) {
+          addCmdLog({ type: 'error', content: 'Session not ready yet. Please wait a moment and try /model again.' });
+        } else {
+          try {
+            if (!cmdArgs) {
+              const models = await queryHandle.supportedModels();
+              const modelList = models.map((m: any) =>
+                `  ${m.value === 'default' ? '* ' : '  '}${m.displayName} (${m.value})${m.description ? ' — ' + m.description : ''}`
+              ).join('\n');
+              addCmdLog({ type: 'system', content: `Available models:\n${modelList}\n\nUsage: /model <model-name>` });
+            } else {
+              const nextModel = normalizeJobModel(cmdArgs);
+              await queryHandle.setModel(nextModel);
+              job.model = nextModel;
+              addCmdLog({ type: 'system', content: `Model switched to: ${cmdArgs}` });
+            }
+          } catch (err: any) {
+            addCmdLog({ type: 'error', content: `Failed to handle /model: ${err.message}` });
+          }
+        }
+        job.updatedAt = new Date().toISOString();
+        saveState();
+        broadcast('job:updated', job);
+        return res.status(200).json(job);
+      }
+
+      if (cmdName === 'help') {
+        addCmdLog({ type: 'system', content: [
+          'Available commands:',
+          '  /compact [instructions] — Compact conversation to reduce context',
+          '  /context — Show context window usage',
+          '  /cost — Show token usage and costs',
+          '  /model [name] — List or switch models',
+          '  /review [pr-url] — Review a pull request',
+          '  /init — Initialize project with CLAUDE.md',
+          '  /help — Show this help message',
+          '  /<skill> — Run a skill (type / to see available skills)',
+        ].join('\n') });
+        job.updatedAt = new Date().toISOString();
+        saveState();
+        broadcast('job:updated', job);
+        return res.status(200).json(job);
+      }
+    }
+  }
 
   // Live session (or idle job with grace period): send message to live subprocess
   if (job.status === 'idle') {
@@ -1035,6 +1219,7 @@ app.post('/api/jobs/:id/continue', (req, res) => {
   }
 
   // Reset existing job for continuation (no duplicate)
+  const canResumeConversation = !!job.sessionId;
   job.prompt = message;
   job.attachments = continueAttachments ?? undefined;
   job.status = 'queued';
@@ -1045,7 +1230,13 @@ app.post('/api/jobs/:id/continue', (req, res) => {
   job.updatedAt = new Date().toISOString();
   job.lastInteractionAt = new Date().toISOString();
   // Keep existing logs — append a separator
-  job.logs.push({ type: 'system', content: '── Continue ──', timestamp: new Date().toISOString() });
+  job.logs.push({
+    type: 'system',
+    content: canResumeConversation
+      ? '── Continue ──'
+      : '── New run (previous session unavailable; prior conversation context not resumed) ──',
+    timestamp: new Date().toISOString(),
+  });
   saveState();
   broadcast('job:updated', job);
 
@@ -1111,6 +1302,7 @@ app.post('/api/jobs/:id/fork', async (req, res) => {
         prompt: prompt.trim(),
         status: 'queued',
         mode: sourceJob.mode ?? 'job',
+        ...(sourceJob.model ? { model: sourceJob.model } : {}),
         ...(sourceJob.thinking ? { thinking: sourceJob.thinking } : {}),
         forkedFrom: { jobId: sourceJob.id, turnIndex: 0 },
         createdAt: now,
@@ -1177,6 +1369,7 @@ app.post('/api/jobs/:id/fork', async (req, res) => {
       status: 'queued',
       sessionId: forkedSessionId,
       mode: sourceJob.mode ?? 'job',
+      ...(sourceJob.model ? { model: sourceJob.model } : {}),
       ...(sourceJob.thinking ? { thinking: sourceJob.thinking } : {}),
       forkedFrom: { jobId: sourceJob.id, turnIndex: targetAssistantTurnIndex },
       createdAt: now,
@@ -1263,14 +1456,20 @@ app.post('/api/jobs/:id/close-session', (req, res) => {
     const log: LogEntry = { type: 'system', content: 'Session closing...', timestamp: new Date().toISOString() };
     job.logs.push(log);
     broadcast('job:log', { jobId: job.id, log });
+    // Update immediately so the UI can surface "Resume as Session" without waiting
+    // for the async generator to unwind and the user having to refresh.
+    job.status = 'completed';
+    job.updatedAt = new Date().toISOString();
+    broadcast('job:updated', job);
+    saveState();
     session.channel.close();
   }
   res.json(job);
 });
 
-// Convert a job to session mode and resume it
+// Convert a job to session mode
 // - idle: cancel auto-complete timer, stay idle indefinitely (already alive)
-// - completed/failed: set mode to session, then restart the job so it enters idle
+// - completed/failed with sessionId: re-attach the resumable SDK session so it becomes live + idle
 app.post('/api/jobs/:id/keep-alive', (req, res) => {
   const job = jobs.find(j => j.id === req.params.id);
   if (!job) return res.status(404).json({ error: 'not found' });
@@ -1294,15 +1493,22 @@ app.post('/api/jobs/:id/keep-alive', (req, res) => {
     return res.json(job);
   }
 
-  // Completed/failed job: just set mode — next Continue will run as session
+  if (!job.sessionId) {
+    return res.status(409).json({ error: 'job has no resumable session ID; cannot resume as a live session' });
+  }
+
+  // Completed/failed job: re-attach the session immediately so the UI becomes live idle
   job.mode = 'session';
+  job.status = 'queued';
   job.idleDeadline = undefined;
+  job.error = undefined;
   job.updatedAt = new Date().toISOString();
-  const log: LogEntry = { type: 'system', content: 'Converted to session mode — send a message to resume', timestamp: new Date().toISOString() };
+  const log: LogEntry = { type: 'system', content: 'Resuming as live session...', timestamp: new Date().toISOString() };
   job.logs.push(log);
   broadcast('job:log', { jobId: job.id, log });
   broadcast('job:updated', job);
   saveState();
+  runJob(job, { activateOnly: true });
   res.json(job);
 });
 
@@ -1322,6 +1528,67 @@ app.post('/api/jobs/:id/complete-now', (req, res) => {
     session.channel.close();
   }
   res.json(job);
+});
+
+// ── CLI-only slash commands (handled server-side via SDK API) ──
+// These commands are NOT supported as SDK slash commands and need to be handled
+// programmatically via queryHandle methods. The SDK only supports /compact, /context, /cost, etc.
+// Commands like /model, /clear, /help are CLI-only.
+
+// POST /api/jobs/:id/model — list available models or switch model
+app.post('/api/jobs/:id/model', async (req, res) => {
+  const job = jobs.find(j => j.id === req.params.id);
+  if (!job) return res.status(404).json({ error: 'not found' });
+
+  const session = activeQueries.get(job.id);
+  const { model } = req.body ?? {};
+
+  if (!model) {
+    // List available models
+    try {
+      const models = await getModelOptions(session, job.model);
+      return res.json({ action: 'list', models });
+    } catch {
+      return res.json({ action: 'list', models: FALLBACK_MODEL_OPTIONS });
+    }
+  }
+
+  // Switch model
+  try {
+    const nextModel = normalizeJobModel(model);
+    if (session?.queryHandle) {
+      await session.queryHandle.setModel(nextModel);
+    }
+    job.model = nextModel;
+    const addLog = (entry: Omit<LogEntry, 'timestamp'>) => {
+      const log: LogEntry = { ...entry, timestamp: new Date().toISOString() };
+      job.logs.push(log);
+      broadcast('job:log', { jobId: job.id, log });
+    };
+    if (session?.queryHandle) {
+      addLog({ type: 'system', content: `Model switched to: ${model}` });
+    }
+    job.updatedAt = new Date().toISOString();
+    broadcast('job:updated', job);
+    saveState();
+    return res.json({ action: session?.queryHandle ? 'switch' : 'configure', model: nextModel ?? 'default', job });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/jobs/:id/models — list available models for a session
+app.get('/api/jobs/:id/models', async (req, res) => {
+  const job = jobs.find(j => j.id === req.params.id);
+  if (!job) return res.status(404).json({ error: 'not found' });
+
+  const session = activeQueries.get(job.id);
+  return res.json(await getModelOptions(session, job.model));
+});
+
+// GET /api/models — list global model choices for new jobs / inactive jobs
+app.get('/api/models', async (_req, res) => {
+  res.json(await getModelOptions());
 });
 
 // ── Slash commands (from SDK) ───────────────────────────────────

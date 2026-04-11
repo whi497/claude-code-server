@@ -44,6 +44,11 @@ export function Sidebar({
   const [renameValue, setRenameValue] = useState('');
   const renameInputRef = useRef<HTMLInputElement>(null);
 
+  // Drag-and-drop state
+  const [draggedProjectId, setDraggedProjectId] = useState<string | null>(null);
+  const [dragOverProjectId, setDragOverProjectId] = useState<string | null>(null);
+  const [dropPosition, setDropPosition] = useState<'above' | 'below' | null>(null);
+
   useEffect(() => {
     if (renamingJobId && renameInputRef.current) {
       renameInputRef.current.focus();
@@ -65,7 +70,9 @@ export function Sidebar({
 
   const cancelRename = () => setRenamingJobId(null);
 
-  const activeProjects = projects.filter(p => !p.archived);
+  const activeProjects = projects
+    .filter(p => !p.archived)
+    .sort((a, b) => (a.sortOrder ?? Infinity) - (b.sortOrder ?? Infinity));
   const archivedProjects = projects.filter(p => p.archived);
 
   const jobCountFor = (pid: string) => jobs.filter(j => j.projectId === pid && j.status !== 'archived').length;
@@ -76,6 +83,65 @@ export function Sidebar({
   const handleContextMenu = (e: React.MouseEvent, projectId: string) => {
     e.preventDefault();
     setContextMenu({ id: projectId, x: e.clientX, y: e.clientY });
+  };
+
+  // ── Drag-and-drop handlers ──
+  const handleDragStart = (e: React.DragEvent, projectId: string) => {
+    setDraggedProjectId(projectId);
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', projectId);
+    requestAnimationFrame(() => {
+      (e.target as HTMLElement).classList.add('dragging');
+    });
+  };
+
+  const handleDragOver = (e: React.DragEvent, projectId: string) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    if (projectId === draggedProjectId) {
+      setDragOverProjectId(null);
+      setDropPosition(null);
+      return;
+    }
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const midY = rect.top + rect.height / 2;
+    setDragOverProjectId(projectId);
+    setDropPosition(e.clientY < midY ? 'above' : 'below');
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    const relatedTarget = e.relatedTarget as HTMLElement;
+    if (!e.currentTarget.contains(relatedTarget)) {
+      setDragOverProjectId(null);
+      setDropPosition(null);
+    }
+  };
+
+  const handleDragEnd = () => {
+    setDraggedProjectId(null);
+    setDragOverProjectId(null);
+    setDropPosition(null);
+    document.querySelectorAll('.project-item.dragging').forEach(el =>
+      el.classList.remove('dragging')
+    );
+  };
+
+  const handleDrop = (e: React.DragEvent, targetProjectId: string) => {
+    e.preventDefault();
+    if (!draggedProjectId || draggedProjectId === targetProjectId) {
+      handleDragEnd();
+      return;
+    }
+    const currentOrder = activeProjects.map(p => p.id);
+    const dragIdx = currentOrder.indexOf(draggedProjectId);
+    let targetIdx = currentOrder.indexOf(targetProjectId);
+    if (dragIdx === -1 || targetIdx === -1) { handleDragEnd(); return; }
+    currentOrder.splice(dragIdx, 1);
+    targetIdx = currentOrder.indexOf(targetProjectId);
+    const insertIdx = dropPosition === 'below' ? targetIdx + 1 : targetIdx;
+    currentOrder.splice(insertIdx, 0, draggedProjectId);
+    api.reorderProjects(currentOrder).catch(console.error);
+    handleDragEnd();
   };
 
   return (
@@ -159,15 +225,22 @@ export function Sidebar({
         </div>
       </div>
 
-      <div className="project-list">
+      <div className={`project-list${draggedProjectId ? ' is-dragging' : ''}`}>
         {activeProjects.map(p => {
           const activeJobs = activeJobsFor(p.id);
+          const isDragOver = dragOverProjectId === p.id;
           return (
             <div key={p.id}>
               <div
-                className={`project-item ${!isApprovalView && selectedProjectId === p.id ? 'active' : ''}`}
+                className={`project-item${!isApprovalView && selectedProjectId === p.id ? ' active' : ''}${draggedProjectId === p.id ? ' dragging' : ''}${isDragOver && dropPosition === 'above' ? ' drop-above' : ''}${isDragOver && dropPosition === 'below' ? ' drop-below' : ''}`}
                 onClick={() => onSelectProject(p.id)}
                 onContextMenu={(e) => handleContextMenu(e, p.id)}
+                draggable
+                onDragStart={(e) => handleDragStart(e, p.id)}
+                onDragOver={(e) => handleDragOver(e, p.id)}
+                onDragLeave={handleDragLeave}
+                onDragEnd={handleDragEnd}
+                onDrop={(e) => handleDrop(e, p.id)}
               >
                 <div className="flex items-center gap-2">
                   <FolderOpen size={14} />
@@ -187,6 +260,8 @@ export function Sidebar({
                     <button
                       className="btn-icon project-menu-btn"
                       onClick={(e) => { e.stopPropagation(); handleContextMenu(e, p.id); }}
+                      onMouseDown={(e) => e.stopPropagation()}
+                      draggable={false}
                       title="More options"
                     >
                       <MoreHorizontal size={12} />

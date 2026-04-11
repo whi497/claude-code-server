@@ -115,6 +115,35 @@ See **[docs/deployment.md](docs/deployment.md)** for production deployment, PM2,
 
 See **[docs/usage.md](docs/usage.md)** for a detailed walkthrough of every feature.
 
+### Session Lifecycle Notes
+
+The current implementation uses three different concepts that are easy to mix up:
+
+- `status` = runtime state: `queued` / `running` / `idle` / `completed` / `failed` / `archived`
+- `mode` = retention policy for the next turn: `job` or `session`
+- `sessionId` = whether Claude SDK gave us a resumable session handle
+
+Current behavior:
+
+- A normal `job` enters `idle` after a successful turn, starts a 5 minute grace timer, then auto-completes.
+- A `session` enters `idle` after a successful turn and stays there until the user closes it.
+- `Pin as Session` on an already-`idle` job is a true in-place conversion: it clears the grace timer and keeps the live channel open.
+- `Resume as Session` on a `completed` or `failed` job with `sessionId` now re-attaches the resumable SDK session immediately, so the job becomes a live `idle` session again.
+- A finished job without `sessionId` can still accept a follow-up, but that follow-up starts a fresh Claude run on the same job record instead of resuming prior conversation context.
+
+Why some completed/failed jobs cannot be resumed as a live session:
+
+- The job failed before the SDK emitted its initial `session_id`
+- The job was imported or created from legacy data without a stored `sessionId`
+- The process/session was lost before a resumable session was captured
+
+UI rules:
+
+- `Pin as Session` is only for a live `idle` one-shot job.
+- `Resume as Session` is only for a finished job with a resumable `sessionId`.
+- Finished jobs without `sessionId` show a warning that follow-up input will start a new run without prior conversation context.
+- `idle` / `Session Active` is only shown after the server has re-established a real live channel.
+
 ---
 
 ## Architecture

@@ -10,6 +10,7 @@ type WSEvent =
   | { event: 'job:log'; data: { jobId: string; log: LogEntry } }
   | { event: 'approval:created'; data: ApprovalRequest }
   | { event: 'approval:updated'; data: ApprovalRequest }
+  | { event: 'projects:reordered'; data: { projects: Project[] } }
   | { event: 'import:progress'; data: ImportProgress }
   | { event: 'import:complete'; data: ImportResult };
 
@@ -90,6 +91,8 @@ export function useStore() {
             const updated = msg.data;
             return { ...s, approvals: s.approvals.map(a => a.id === updated.id ? updated : a) };
           }
+          case 'projects:reordered':
+            return { ...s, projects: msg.data.projects };
           case 'import:progress':
             return { ...s, importProgress: msg.data };
           case 'import:complete':

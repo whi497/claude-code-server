@@ -5,8 +5,9 @@ import { useAttachments } from '../hooks/useAttachments';
 import { SuggestionDropdown } from './SuggestionDropdown';
 import { AttachmentPreview } from './AttachmentPreview';
 import { AttachmentBadge } from './AttachmentPreview';
-import type { Job, LogEntry, ThinkingConfig, EffortLevel } from '../types';
-import { Square, Archive, Play, FolderTree, ScrollText, MessageSquare, ChevronDown, ChevronRight, Wrench, Terminal, FileText, Search, Edit3, PenTool, Globe, Bot, FileCode, Copy, BookOpen, Clock, Save, X, Folder, FolderOpen, File, RefreshCw, GitBranch, Plus, Upload, Download, Check, Undo2, Star, Maximize2, ListPlus, Brain, Paperclip } from 'lucide-react';
+import { ThinkingToolbar, ModelPickerModal, getModelDisplayName } from './PromptControls';
+import type { Job, LogEntry, ThinkingConfig, EffortLevel, ModelOption } from '../types';
+import { Square, Archive, Play, FolderTree, ScrollText, MessageSquare, ChevronDown, ChevronRight, Wrench, Terminal, FileText, Search, Edit3, PenTool, Globe, Bot, FileCode, Copy, BookOpen, Clock, Save, X, Folder, FolderOpen, File, RefreshCw, GitBranch, Plus, Upload, Download, Check, Undo2, Star, Maximize2, ListPlus, Brain, Paperclip, Cpu, AlertTriangle } from 'lucide-react';
 import { renderInline, isTableRow, isTableSeparator, renderTable, renderMarkdown } from './Markdown';
 import { TerminalPane } from './TerminalPane';
 
@@ -592,95 +593,6 @@ function ToolBodyDefault({ result }: { result?: string }) {
   const parsed = parseToolResult(result);
   const truncated = parsed.length > 800 ? parsed.slice(0, 800) + '…' : parsed;
   return <pre className="chat-tool-code chat-tool-output">{truncated}</pre>;
-}
-
-// ── Thinking toolbar for chat input bar ──────────────────────────
-const EFFORT_LEVELS: { value: EffortLevel; label: string; color: string }[] = [
-  { value: 'low', label: 'Lo', color: 'var(--text-muted)' },
-  { value: 'medium', label: 'Med', color: 'var(--info)' },
-  { value: 'high', label: 'Hi', color: 'var(--idle-fg)' },
-];
-const BUDGET_PRESETS = [
-  { label: '10k', value: 10000 },
-  { label: '50k', value: 50000 },
-  { label: '100k', value: 100000 },
-];
-
-interface ThinkingToolbarProps {
-  enabled: boolean;
-  effort: EffortLevel;
-  budget: number;
-  onToggle: (enabled: boolean) => void;
-  onEffortChange: (effort: EffortLevel) => void;
-  onBudgetChange: (budget: number) => void;
-}
-
-function ThinkingToolbar({ enabled, effort, budget, onToggle, onEffortChange, onBudgetChange }: ThinkingToolbarProps) {
-  const [showBudget, setShowBudget] = useState(false);
-
-  return (
-    <div className="thinking-toolbar">
-      <button
-        type="button"
-        className={`thinking-toolbar-toggle ${enabled ? 'active' : ''}`}
-        onClick={() => onToggle(!enabled)}
-        title={enabled ? 'Disable extended thinking' : 'Enable extended thinking'}
-      >
-        <Brain size={13} />
-        <span>{enabled ? 'Thinking' : 'Think'}</span>
-      </button>
-      {enabled && (
-        <>
-          <div className="thinking-toolbar-effort">
-            {EFFORT_LEVELS.map(e => (
-              <button
-                key={e.value}
-                type="button"
-                className={`thinking-effort-btn ${effort === e.value ? 'active' : ''}`}
-                onClick={() => onEffortChange(e.value)}
-                title={`${e.value} effort`}
-              >
-                {e.label}
-              </button>
-            ))}
-          </div>
-          <button
-            type="button"
-            className={`thinking-toolbar-budget-toggle ${showBudget ? 'active' : ''}`}
-            onClick={() => setShowBudget(!showBudget)}
-            title="Adjust token budget"
-          >
-            {(budget / 1000).toFixed(0)}k
-          </button>
-          {showBudget && (
-            <div className="thinking-toolbar-budget">
-              {BUDGET_PRESETS.map(p => (
-                <button
-                  key={p.value}
-                  type="button"
-                  className={`thinking-budget-btn ${budget === p.value ? 'active' : ''}`}
-                  onClick={() => onBudgetChange(p.value)}
-                >
-                  {p.label}
-                </button>
-              ))}
-              <input
-                type="number"
-                value={budget}
-                onChange={e => {
-                  const v = parseInt(e.target.value, 10);
-                  if (!isNaN(v) && v > 0) onBudgetChange(v);
-                }}
-                className="thinking-budget-input"
-                title="Custom token budget"
-                onClick={e => e.stopPropagation()}
-              />
-            </div>
-          )}
-        </>
-      )}
-    </div>
-  );
 }
 
 // ── Thinking block (collapsible) ──────────────────────────────
@@ -1319,6 +1231,10 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
     timestamp?: string;
   } | null>(null);
   const [forkSubmitting, setForkSubmitting] = useState(false);
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const [availableModels, setAvailableModels] = useState<ModelOption[]>([]);
+  const [modelPickerLoading, setModelPickerLoading] = useState(false);
+  const [currentModel, setCurrentModel] = useState<string>(job.model ?? 'default');
   const termRef = useRef<HTMLDivElement>(null);
   const chatRef = useRef<HTMLDivElement>(null);
   const userScrolledUpRef = useRef(false);
@@ -1332,6 +1248,10 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
     userScrolledUpRef.current = false;
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [job.id]);
+
+  useEffect(() => {
+    setCurrentModel(job.model ?? 'default');
+  }, [job.id, job.model]);
 
   // Commands for / suggestions — contextual to current job state
   const suggestionCommands = useMemo<CommandDef[]>(() => {
@@ -1418,6 +1338,24 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
     api.continueJob(job.id, fullCommand).catch(console.error);
   }, [job.id]);
 
+  const handleOpenModelPicker = useCallback(async () => {
+    setModelPickerOpen(true);
+    setModelPickerLoading(true);
+    try {
+      const models = await api.getModels(job.id);
+      setAvailableModels(models);
+    } catch { setAvailableModels([]); }
+    finally { setModelPickerLoading(false); }
+  }, [job.id]);
+
+  const handleSelectModel = useCallback(async (modelValue: string) => {
+    setModelPickerOpen(false);
+    try {
+      await api.switchModel(job.id, modelValue);
+      setCurrentModel(modelValue);
+    } catch (e) { console.error(e); }
+  }, [job.id]);
+
   const suggestions = useSuggestions({
     inputRef,
     value: followUp,
@@ -1426,6 +1364,7 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
     commands: suggestionCommands,
     sdkCommands,
     onSdkCommand: handleSdkCommand,
+    onModelPicker: handleOpenModelPicker,
     enabled: true,
   });
 
@@ -1575,7 +1514,7 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
     };
     const thinking = buildThinkingConfig();
     const sendAttachments = attach.attachments.length > 0 ? attach.attachments : undefined;
-    api.continueJob(job.id, followUp, thinking, sendAttachments).then(resetTextarea).catch(console.error);
+    api.continueJob(job.id, followUp, thinking, currentModel, sendAttachments).then(resetTextarea).catch(console.error);
   };
 
   // ── Fork handlers ──
@@ -1679,11 +1618,29 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
   const isRunning = job.status === 'running';
   const isIdle = job.status === 'idle';
   const isSession = job.mode === 'session';
+  const isFinished = job.status === 'completed' || job.status === 'failed';
+  const hasResumableSession = !!job.sessionId;
   const canSendMessage = isIdle;  // All idle jobs can send messages (session or regular with grace period)
   const canQueueMessage = isRunning; // Can queue messages while Claude is working
-  const canContinue = (job.status === 'completed' || job.status === 'failed') && !!job.sessionId;
+  const canContinue = isFinished;
+  const canResumeWithContext = isFinished && hasResumableSession;
   const showInput = canSendMessage || canContinue || canQueueMessage;
+  const showModelSelector = canSendMessage || canQueueMessage || canResumeWithContext;
   const hasIdleDeadline = isIdle && !isSession && !!job.idleDeadline;
+  const followUpPlaceholder = canQueueMessage
+    ? 'Queue a message for Claude...'
+    : canSendMessage
+      ? 'Type @ for files, / for commands...'
+      : canResumeWithContext
+        ? 'Resume this conversation... (@ files, / commands)'
+        : 'Start a new turn on this job... (@ files, / commands)';
+  const followUpActionLabel = canQueueMessage
+    ? 'Queue'
+    : canSendMessage
+      ? 'Send'
+      : canResumeWithContext
+        ? 'Continue'
+        : 'New Turn';
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
@@ -1727,9 +1684,9 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
                 <Check size={12} /> Complete Now
               </button>
             )}
-            {(job.status === 'completed' || job.status === 'failed') && !isSession && !!job.sessionId && (
+            {isFinished && hasResumableSession && (
               <button className="btn btn-sm btn-accent" onClick={() => api.keepAlive(job.id).catch(console.error)}>
-                <Star size={12} /> Convert to Session
+                <Star size={12} /> Resume as Session
               </button>
             )}
             {job.status !== 'archived' && !isRunning && !isIdle && (
@@ -1744,6 +1701,12 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
             <Clock size={12} />
             <span>Auto-completing in <strong>{idleCountdown}</strong></span>
             <span className="idle-countdown-hint">Send a message or pin as session to keep alive</span>
+          </div>
+        )}
+        {isFinished && !hasResumableSession && (
+          <div className="resume-context-bar">
+            <AlertTriangle size={12} />
+            <span>This job has no resumable session ID. A follow-up will start a new Claude run on this job record without prior conversation context.</span>
           </div>
         )}
         {job.forkedFrom && (
@@ -1920,14 +1883,27 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
                 {canQueueMessage && (
                   <div className="chat-queue-hint">Message will be queued and processed after the current turn</div>
                 )}
-                <ThinkingToolbar
-                  enabled={inputThinkingEnabled}
-                  effort={inputThinkingEffort}
-                  budget={inputThinkingBudget}
-                  onToggle={handleThinkingToggle}
-                  onEffortChange={handleThinkingEffortChange}
-                  onBudgetChange={handleThinkingBudgetChange}
-                />
+                <div className="input-toolbar-row">
+                  <ThinkingToolbar
+                    enabled={inputThinkingEnabled}
+                    effort={inputThinkingEffort}
+                    budget={inputThinkingBudget}
+                    onToggle={handleThinkingToggle}
+                    onEffortChange={handleThinkingEffortChange}
+                    onBudgetChange={handleThinkingBudgetChange}
+                  />
+                  {showModelSelector && (
+                    <button
+                      type="button"
+                      className="model-selector-btn"
+                      onClick={handleOpenModelPicker}
+                      title="Switch model"
+                    >
+                      <Cpu size={13} />
+                      <span>{getModelDisplayName(currentModel, availableModels)}</span>
+                    </button>
+                  )}
+                </div>
                 <AttachmentPreview attachments={attach.attachments} onRemove={attach.removeAttachment} />
                 {attach.error && <p className="attachment-error">{attach.error}</p>}
                 <div className="chat-input-row">
@@ -1949,7 +1925,7 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
                     <textarea
                       ref={tab === 'chat' ? inputRef : undefined}
                       className="chat-textarea flex-1"
-                      placeholder={canQueueMessage ? 'Queue a message for Claude...' : canSendMessage ? 'Type @ for files, / for commands...' : 'Send follow-up prompt... (@ files, / commands)'}
+                      placeholder={followUpPlaceholder}
                       value={followUp}
                       onChange={suggestions.handleChange}
                       onPaste={attach.handlePaste}
@@ -1981,7 +1957,7 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
                     )}
                   </div>
                   <button className="btn btn-primary" onClick={handleSend} disabled={!followUp.trim()}>
-                    {canQueueMessage ? <><ListPlus size={12} /> Queue</> : <><Play size={12} /> {canSendMessage ? 'Send' : 'Continue'}</>}
+                    {canQueueMessage ? <><ListPlus size={12} /> Queue</> : <><Play size={12} /> {followUpActionLabel}</>}
                   </button>
                 </div>
               </div>
@@ -2019,14 +1995,27 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
                 {canQueueMessage && (
                   <div className="chat-queue-hint">Message will be queued and processed after the current turn</div>
                 )}
-                <ThinkingToolbar
-                  enabled={inputThinkingEnabled}
-                  effort={inputThinkingEffort}
-                  budget={inputThinkingBudget}
-                  onToggle={handleThinkingToggle}
-                  onEffortChange={handleThinkingEffortChange}
-                  onBudgetChange={handleThinkingBudgetChange}
-                />
+                <div className="input-toolbar-row">
+                  <ThinkingToolbar
+                    enabled={inputThinkingEnabled}
+                    effort={inputThinkingEffort}
+                    budget={inputThinkingBudget}
+                    onToggle={handleThinkingToggle}
+                    onEffortChange={handleThinkingEffortChange}
+                    onBudgetChange={handleThinkingBudgetChange}
+                  />
+                  {showModelSelector && (
+                    <button
+                      type="button"
+                      className="model-selector-btn"
+                      onClick={handleOpenModelPicker}
+                      title="Switch model"
+                    >
+                      <Cpu size={13} />
+                      <span>{getModelDisplayName(currentModel, availableModels)}</span>
+                    </button>
+                  )}
+                </div>
                 <AttachmentPreview attachments={attach.attachments} onRemove={attach.removeAttachment} />
                 {attach.error && <p className="attachment-error">{attach.error}</p>}
                 <div className="chat-input-row">
@@ -2037,7 +2026,7 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
                     <textarea
                       ref={tab === 'output' ? inputRef : undefined}
                       className="chat-textarea flex-1"
-                      placeholder={canQueueMessage ? 'Queue a message for Claude...' : canSendMessage ? 'Type @ for files, / for commands...' : 'Send follow-up prompt... (@ files, / commands)'}
+                      placeholder={followUpPlaceholder}
                       value={followUp}
                       onChange={suggestions.handleChange}
                       onPaste={attach.handlePaste}
@@ -2069,7 +2058,7 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
                     )}
                   </div>
                   <button className="btn btn-primary" onClick={handleSend} disabled={!followUp.trim()}>
-                    {canQueueMessage ? <><ListPlus size={12} /> Queue</> : <><Play size={12} /> {canSendMessage ? 'Send' : 'Continue'}</>}
+                    {canQueueMessage ? <><ListPlus size={12} /> Queue</> : <><Play size={12} /> {followUpActionLabel}</>}
                   </button>
                 </div>
               </div>
@@ -2602,6 +2591,18 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
           </div>
         )}
       </div>
+
+      {/* Model picker modal */}
+      <ModelPickerModal
+        isOpen={modelPickerOpen}
+        onClose={() => setModelPickerOpen(false)}
+        models={availableModels}
+        loading={modelPickerLoading}
+        currentValue={currentModel}
+        title={isRunning || isIdle ? 'Switch Model' : 'Select Model For Next Run'}
+        emptyMessage="No models available."
+        onSelect={handleSelectModel}
+      />
 
       {/* Fork / Edit modal */}
       <ForkModal

@@ -8,6 +8,7 @@ export interface Project {
   archived?: boolean;
   archivedAt?: string;
   importedFrom?: 'local';
+  sortOrder?: number;
 }
 
 export type EffortLevel = 'low' | 'medium' | 'high';
@@ -31,6 +32,7 @@ export interface Job {
   projectId: string;
   name?: string;
   prompt: string;
+  model?: string;
   attachments?: Attachment[];
   status: JobStatus;
   sessionId?: string;
