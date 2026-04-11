@@ -90,7 +90,7 @@ info "Checking prerequisites..."
 # Helper: load nvm if installed but not yet sourced
 load_nvm() {
   export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
-  [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+  [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" || true
 }
 
 # Helper: install Node.js via nvm

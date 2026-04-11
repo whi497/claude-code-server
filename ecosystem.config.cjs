@@ -16,7 +16,7 @@ module.exports = {
       script: 'node_modules/.bin/tsx',
       args: 'src/index.ts',
       env: {
-        PORT: 3001,
+        PORT: process.env.PORT || 3001,
         NODE_ENV: 'production',
         // Inherit ANTHROPIC_API_KEY from shell env
       },
