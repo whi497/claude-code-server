@@ -1238,7 +1238,8 @@ function ForkModal({ isOpen, onClose, onSubmit, mode, originalText, turnTimestam
           placeholder={mode === 'fork' ? 'Enter your prompt for the fork...' : 'Edit your message...'}
           rows={4}
           onKeyDown={e => {
-            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && text.trim()) {
+            if (e.key === 'Enter' && !e.shiftKey && text.trim()) {
+              e.preventDefault();
               onSubmit(text.trim());
             }
             if (e.key === 'Escape') onClose();
@@ -1711,7 +1712,7 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
                 <Check size={12} /> Complete Now
               </button>
             )}
-            {(job.status === 'completed' || job.status === 'failed') && !isSession && (
+            {(job.status === 'completed' || job.status === 'failed') && !isSession && !!job.sessionId && (
               <button className="btn btn-sm btn-accent" onClick={() => api.keepAlive(job.id).catch(console.error)}>
                 <Star size={12} /> Convert to Session
               </button>
@@ -1941,7 +1942,7 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
                       onKeyDown={e => {
                         suggestions.handleKeyDown(e);
                         if (e.defaultPrevented) return;
-                        if (e.key === 'Enter' && e.shiftKey) {
+                        if (e.key === 'Enter' && !e.shiftKey) {
                           e.preventDefault();
                           handleSend();
                         }
@@ -2029,7 +2030,7 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
                       onKeyDown={e => {
                         suggestions.handleKeyDown(e);
                         if (e.defaultPrevented) return;
-                        if (e.key === 'Enter' && e.shiftKey) {
+                        if (e.key === 'Enter' && !e.shiftKey) {
                           e.preventDefault();
                           handleSend();
                         }

@@ -105,8 +105,9 @@ export function NewJobModal({ projectId, onClose, onCreated }: Props) {
             onPaste={attach.handlePaste}
             onKeyDown={e => {
               suggestions.handleKeyDown(e);
-              // Only submit on Ctrl/Cmd+Enter when dropdown is closed
-              if (!e.defaultPrevented && (e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+              // Enter to submit, Shift+Enter for new line
+              if (!e.defaultPrevented && e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
                 handleSubmit();
               }
             }}

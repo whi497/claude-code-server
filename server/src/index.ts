@@ -1268,9 +1268,9 @@ app.post('/api/jobs/:id/close-session', (req, res) => {
   res.json(job);
 });
 
-// Convert a job to session mode (works in idle, completed, or failed states)
-// - idle: cancel auto-complete timer, stay idle indefinitely
-// - completed/failed: set mode so next Continue runs as session (no auto-complete)
+// Convert a job to session mode and resume it
+// - idle: cancel auto-complete timer, stay idle indefinitely (already alive)
+// - completed/failed: set mode to session, then restart the job so it enters idle
 app.post('/api/jobs/:id/keep-alive', (req, res) => {
   const job = jobs.find(j => j.id === req.params.id);
   if (!job) return res.status(404).json({ error: 'not found' });
@@ -1278,19 +1278,27 @@ app.post('/api/jobs/:id/keep-alive', (req, res) => {
   if (!allowed.includes(job.status)) {
     return res.status(400).json({ error: `cannot convert to session in ${job.status} state` });
   }
-  if (job.mode === 'session') {
-    return res.status(200).json(job); // already a session, no-op
+
+  // Idle job: just pin as session (channel is still alive)
+  if (job.status === 'idle') {
+    if (job.mode === 'session') return res.status(200).json(job); // already pinned
+    clearIdleTimer(job.id);
+    job.mode = 'session';
+    job.idleDeadline = undefined;
+    job.updatedAt = new Date().toISOString();
+    const log: LogEntry = { type: 'system', content: 'Job pinned as session — will stay idle until manually closed', timestamp: new Date().toISOString() };
+    job.logs.push(log);
+    broadcast('job:log', { jobId: job.id, log });
+    broadcast('job:updated', job);
+    saveState();
+    return res.json(job);
   }
 
-  clearIdleTimer(job.id);
+  // Completed/failed job: just set mode — next Continue will run as session
   job.mode = 'session';
   job.idleDeadline = undefined;
   job.updatedAt = new Date().toISOString();
-
-  const msg = job.status === 'idle'
-    ? 'Job pinned as session — will stay idle until manually closed'
-    : 'Job converted to session mode — next Continue will run as persistent session';
-  const log: LogEntry = { type: 'system', content: msg, timestamp: new Date().toISOString() };
+  const log: LogEntry = { type: 'system', content: 'Converted to session mode — send a message to resume', timestamp: new Date().toISOString() };
   job.logs.push(log);
   broadcast('job:log', { jobId: job.id, log });
   broadcast('job:updated', job);
