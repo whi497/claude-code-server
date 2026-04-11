@@ -1861,10 +1861,17 @@ async function listMdFiles(dir: string, depth = 0): Promise<{ name: string; path
 }
 
 // Derive auto-memory project dir: ~/.claude/projects/<sanitized-path>/memory/
-function getAutoMemoryDir(projectPath: string): string {
+// Claude Code uses the git root (if inside a repo) or the project path, then
+// sanitizes by replacing '/' with '-' (keeping the leading '-').
+async function getAutoMemoryDir(projectPath: string): Promise<string> {
   const userHome = process.env.HOME || process.env.USERPROFILE || '';
-  // Claude Code uses the git root or project path, sanitized
-  const sanitized = projectPath.replace(/\//g, '-').replace(/^-/, '');
+  // Try to resolve git root (Claude Code scopes auto-memory per repo root)
+  let root = projectPath;
+  try {
+    const { stdout } = await execFileAsync('git', ['rev-parse', '--show-toplevel'], { cwd: projectPath });
+    root = stdout.trim();
+  } catch { /* not a git repo — use projectPath as-is */ }
+  const sanitized = root.replace(/\//g, '-');
   return path.join(userHome, '.claude', 'projects', sanitized, 'memory');
 }
 
@@ -1914,7 +1921,7 @@ app.get('/api/projects/:id/memories', async (req, res) => {
   }
 
   // 7. Auto memory
-  const autoMemDir = getAutoMemoryDir(project.path);
+  const autoMemDir = await getAutoMemoryDir(project.path);
   const autoMemFiles = await listMdFiles(autoMemDir);
   if (autoMemFiles.length > 0) {
     sections.push({ level: 'auto-memory', label: 'Auto Memory', path: autoMemDir, content: null, editable: false, files: autoMemFiles });

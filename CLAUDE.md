@@ -259,28 +259,6 @@ After you finish your change(add feature, fix bug,...), restart the frontend to 
 11. **SDK slash commands**: fetched via `session.queryHandle.supportedCommands()` with a `cachedCommands` fallback; client retries up to 3 times (1.5s apart) for session handle readiness
 
 
-## Feishu / Lark Notification — claude-code-server Group
-
-When working on this project (claude-code-server), **send all Lark notifications to the dedicated group chat** instead of a personal DM:
-
-```bash
-# Group chat ID for "claude-code-server"
-lark-cli im +messages-send --chat-id oc_a348656e76a8f3ba88a9114eb75cf1af --text "<message>" --as bot
-```
-
-Use this for:
-- Asking clarifying questions before proceeding
-- Requesting approval or confirmation for destructive/important actions
-- Notifying that a background task completed or failed
-- Alerting when authentication/cookies have expired
-- When you finish a user's request, notify the user that you are done
-- CronJob result you think need to notify the user
-- Any situation you want to human to notice or need human to help or intervene
-- Any situation where the user may not be actively watching the terminal
-
-> **Do NOT use the personal DM** (`--user-id ou_9607405668b2476d7e46810fcfce176b`) when working in this project. Always use the group `--chat-id oc_a348656e76a8f3ba88a9114eb75cf1af`.
-
-
 ## Claude-Agent-SDK develop ref
 You actively look for official doc when develop feature when you need to implement feature/fix bug related to claude-agent-sdk
 @https://platform.claude.com/docs/en/agent-sdk/overview

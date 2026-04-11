@@ -7,9 +7,9 @@
     "build:client": "cd client && npx vite build",
     "dev": "npx concurrently \"npm run dev:server\" \"npm run dev:client\"",
     "build": "npm run build:client",
-    "start": "npm run build:client && pm2 start ecosystem.config.cjs",
+    "start": "pm2 start ecosystem.config.cjs",
     "stop": "pm2 stop claude-code-server",
-    "restart": "npm run build:client && pm2 restart claude-code-server",
+    "restart": "pm2 restart claude-code-server",
     "logs": "pm2 logs claude-code-server",
     "status": "pm2 describe claude-code-server"
   },

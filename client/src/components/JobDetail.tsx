@@ -1321,13 +1321,15 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
   const [forkSubmitting, setForkSubmitting] = useState(false);
   const termRef = useRef<HTMLDivElement>(null);
   const chatRef = useRef<HTMLDivElement>(null);
+  const userScrolledUpRef = useRef(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   const attach = useAttachments();
 
-  // Clear attachments when switching to a different job
+  // Clear attachments and reset scroll state when switching to a different job
   useEffect(() => {
     attach.clearAll();
+    userScrolledUpRef.current = false;
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [job.id]);
 
@@ -1486,8 +1488,21 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
     return files;
   }, [allLogs]);
 
-  // Auto-scroll
+  // Track user scroll position — if user scrolls up, stop auto-scrolling
   useEffect(() => {
+    const el = tab === 'chat' ? chatRef.current : termRef.current;
+    if (!el) return;
+    const handleScroll = () => {
+      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+      userScrolledUpRef.current = distanceFromBottom > 80;
+    };
+    el.addEventListener('scroll', handleScroll);
+    return () => el.removeEventListener('scroll', handleScroll);
+  }, [tab]);
+
+  // Auto-scroll only when user is near the bottom
+  useEffect(() => {
+    if (userScrolledUpRef.current) return;
     const el = tab === 'chat' ? chatRef.current : termRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [allLogs.length, chatMessages.length, tab]);

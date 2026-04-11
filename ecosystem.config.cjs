@@ -13,11 +13,12 @@ module.exports = {
     {
       name: 'claude-code-server',
       cwd: path.join(__dirname, 'server'),
-      script: 'node_modules/.bin/tsx',
-      args: 'src/index.ts',
+      script: path.join(__dirname, 'start-server.sh'),
+      interpreter: '/bin/bash',
       env: {
         PORT: process.env.PORT || 3001,
         NODE_ENV: 'production',
+        PROJECT_ROOT: __dirname,
         // Inherit ANTHROPIC_API_KEY from shell env
       },
       // Restart policy

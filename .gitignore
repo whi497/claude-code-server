@@ -5,4 +5,5 @@ projects/
 .env
 *.log
 .claude
+CLAUDE.local.md
 .omx
