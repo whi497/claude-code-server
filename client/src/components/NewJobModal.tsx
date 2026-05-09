@@ -5,7 +5,7 @@ import { useSuggestions, type CommandDef, FALLBACK_SDK_COMMANDS } from '../hooks
 import { useAttachments } from '../hooks/useAttachments';
 import { SuggestionDropdown } from './SuggestionDropdown';
 import { AttachmentPreview } from './AttachmentPreview';
-import { ThinkingToolbar, ModelPickerModal, getModelDisplayName } from './PromptControls';
+import { ContextToolbar, ThinkingToolbar, ModelPickerModal, getModelDisplayName } from './PromptControls';
 import type { Job, ThinkingConfig, ModelOption } from '../types';
 
 interface Props {
@@ -22,7 +22,9 @@ export function NewJobModal({ projectId, onClose, onCreated }: Props) {
   const [thinkingEnabled, setThinkingEnabled] = useState(false);
   const [thinkingBudget, setThinkingBudget] = useState(DEFAULT_THINKING_BUDGET);
   const [thinkingEffort, setThinkingEffort] = useState<'low' | 'medium' | 'high'>('medium');
+  const [contextOneMillion, setContextOneMillion] = useState(false);
   const [selectedModel, setSelectedModel] = useState('default');
+  const [selectedModelDisplayName, setSelectedModelDisplayName] = useState<string | undefined>();
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([]);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [modelPickerLoading, setModelPickerLoading] = useState(false);
@@ -76,7 +78,9 @@ export function NewJobModal({ projectId, onClose, onCreated }: Props) {
         prompt.trim(),
         sessionMode ? 'session' : undefined,
         thinking,
+        contextOneMillion ? { oneMillion: true } : undefined,
         selectedModel,
+        selectedModelDisplayName,
         attach.attachments.length > 0 ? attach.attachments : undefined,
       );
       attach.clearAll();
@@ -155,6 +159,10 @@ export function NewJobModal({ projectId, onClose, onCreated }: Props) {
             onEffortChange={setThinkingEffort}
             onBudgetChange={setThinkingBudget}
           />
+          <ContextToolbar
+            oneMillion={contextOneMillion}
+            onToggle={setContextOneMillion}
+          />
           <button
             type="button"
             className="model-selector-btn"
@@ -162,7 +170,7 @@ export function NewJobModal({ projectId, onClose, onCreated }: Props) {
             title="Select model"
           >
             <Cpu size={13} />
-            <span>{getModelDisplayName(selectedModel, availableModels)}</span>
+            <span>{getModelDisplayName(selectedModel, availableModels, selectedModelDisplayName)}</span>
           </button>
         </div>
         <p className="text-sm text-muted" style={{ marginTop: 8, marginBottom: 0 }}>
@@ -204,10 +212,12 @@ export function NewJobModal({ projectId, onClose, onCreated }: Props) {
         models={availableModels}
         loading={modelPickerLoading}
         currentValue={selectedModel}
+        currentDisplayName={selectedModelDisplayName}
         title="Select Model"
         emptyMessage="No models available."
-        onSelect={(value) => {
-          setSelectedModel(value);
+        onSelect={(model) => {
+          setSelectedModel(model.value);
+          setSelectedModelDisplayName(model.displayName);
           setModelPickerOpen(false);
         }}
       />

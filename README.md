@@ -188,11 +188,11 @@ Browser (React + TypeScript)
 |---------------------|---------|-------------|
 | `ANTHROPIC_API_KEY` | *(required)* | Your Anthropic API key |
 | `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | Custom API endpoint (proxy, gateway) |
-| `CLAUDE_CODE_SERVER_MODELS` | *(SDK/fallback list)* | Optional comma- or newline-separated model list shown in model pickers |
+| `CLAUDE_CODE_SERVER_MODELS` | *(Claude Code aliases + SDK list)* | Optional comma- or newline-separated model list shown in model pickers. Use `model-name \| Haiku`, `model-name \| Sonnet`, or `model-name \| Opus` to map common labels; plain entries are shown as additional models. |
 | `PORT` | `3001` | Server port |
 | `PROJECTS_ROOT` | `./projects` | Root directory for project workspaces |
 
-All variables can be set in a `.env` file in the project root. The web app also has a Settings button in the lower-left sidebar for editing the API key, base URL, and model list. Saved settings update `.env` and apply to new jobs and sessions; already-running sessions keep their current SDK process settings.
+All variables can be set in a `.env` file in the project root. The web app also has a Settings button in the lower-left sidebar for editing the API key, base URL, Haiku/Sonnet/Opus model mappings, and extra model names. Saved settings update `.env` and apply to new jobs and sessions; already-running sessions keep their current SDK process settings.
 
 ---
 

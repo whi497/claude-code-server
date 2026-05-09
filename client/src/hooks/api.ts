@@ -11,7 +11,14 @@ async function request(path: string, opts?: RequestInit) {
 
 export const api = {
   getSettings: (): Promise<import('../types').AppSettings> => request('/settings'),
-  updateSettings: (settings: { anthropicApiKey?: string; clearAnthropicApiKey?: boolean; anthropicBaseUrl?: string; modelsText?: string }): Promise<import('../types').AppSettings> =>
+  updateSettings: (settings: {
+    anthropicApiKey?: string;
+    clearAnthropicApiKey?: boolean;
+    anthropicBaseUrl?: string;
+    modelsText?: string;
+    modelShortcuts?: import('../types').ModelShortcutSettings;
+    customModels?: string[];
+  }): Promise<import('../types').AppSettings> =>
     request('/settings', { method: 'PUT', body: JSON.stringify(settings) }),
   getProjects: () => request('/projects'),
   createProject: (name: string, path?: string) => request('/projects', { method: 'POST', body: JSON.stringify({ name, path }) }),
@@ -19,13 +26,14 @@ export const api = {
   reorderProjects: (orderedIds: string[]) => request('/projects/reorder', { method: 'PUT', body: JSON.stringify({ orderedIds }) }),
   getJobs: (projectId?: string) => request(`/jobs${projectId ? `?projectId=${projectId}` : ''}`),
   getJob: (id: string) => request(`/jobs/${id}`),
-  createJob: (projectId: string, prompt: string, mode?: string, thinking?: { type: 'disabled' } | { type: 'enabled'; budgetTokens: number; effort?: string }, model?: string, attachments?: import('../types').Attachment[]) => request('/jobs', { method: 'POST', body: JSON.stringify({ projectId, prompt, mode, thinking, ...(model ? { model } : {}), ...(attachments?.length ? { attachments } : {}) }) }),
+  createJob: (projectId: string, prompt: string, mode?: string, thinking?: { type: 'disabled' } | { type: 'enabled'; budgetTokens: number; effort?: string }, context?: import('../types').ContextConfig, model?: string, modelDisplayName?: string, attachments?: import('../types').Attachment[]) => request('/jobs', { method: 'POST', body: JSON.stringify({ projectId, prompt, mode, thinking, context, ...(model ? { model, modelDisplayName } : {}), ...(attachments?.length ? { attachments } : {}) }) }),
   renameJob: (id: string, name: string) => request(`/jobs/${id}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
   archiveJob: (id: string) => request(`/jobs/${id}/archive`, { method: 'POST' }),
   unarchiveJob: (id: string) => request(`/jobs/${id}/unarchive`, { method: 'POST' }),
   stopJob: (id: string) => request(`/jobs/${id}/stop`, { method: 'POST' }),
-  continueJob: (id: string, prompt?: string, thinking?: { type: 'disabled' } | { type: 'enabled'; budgetTokens: number; effort?: string }, model?: string, attachments?: import('../types').Attachment[]) => request(`/jobs/${id}/continue`, { method: 'POST', body: JSON.stringify({ prompt, thinking, ...(model ? { model } : {}), ...(attachments?.length ? { attachments } : {}) }) }),
+  continueJob: (id: string, prompt?: string, thinking?: { type: 'disabled' } | { type: 'enabled'; budgetTokens: number; effort?: string }, context?: import('../types').ContextConfig, model?: string, modelDisplayName?: string, attachments?: import('../types').Attachment[]) => request(`/jobs/${id}/continue`, { method: 'POST', body: JSON.stringify({ prompt, thinking, context, ...(model ? { model, modelDisplayName } : {}), ...(attachments?.length ? { attachments } : {}) }) }),
   updateJobThinking: (id: string, thinking: { type: 'disabled' } | { type: 'enabled'; budgetTokens: number; effort?: string } | null) => request(`/jobs/${id}/thinking`, { method: 'PUT', body: JSON.stringify({ thinking }) }),
+  updateJobContext: (id: string, context: import('../types').ContextConfig | null) => request(`/jobs/${id}/context`, { method: 'PUT', body: JSON.stringify({ context }) }),
   forkJob: (id: string, body: { prompt: string; forkPoint: { type: 'after_assistant' | 'edit_user'; turnIndex: number } }): Promise<{ id: string }> =>
     request(`/jobs/${id}/fork`, { method: 'POST', body: JSON.stringify(body) }),
   closeSession: (id: string) => request(`/jobs/${id}/close-session`, { method: 'POST' }),
@@ -73,8 +81,8 @@ export const api = {
     request(`/jobs/${jobId}/models`),
   getAvailableModels: (): Promise<import('../types').ModelOption[]> =>
     request('/models'),
-  switchModel: (jobId: string, model: string) =>
-    request(`/jobs/${jobId}/model`, { method: 'POST', body: JSON.stringify({ model }) }),
+  switchModel: (jobId: string, model: string, modelDisplayName?: string) =>
+    request(`/jobs/${jobId}/model`, { method: 'POST', body: JSON.stringify({ model, modelDisplayName }) }),
   // Search
   searchJobs: (query: string, limit?: number) => {
     const params = new URLSearchParams({ q: query });

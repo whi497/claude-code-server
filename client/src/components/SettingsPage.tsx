@@ -1,13 +1,30 @@
 import { useEffect, useState } from 'react';
-import { Cpu, KeyRound, Save, Server, Settings, Trash2 } from 'lucide-react';
+import { Cpu, KeyRound, Plus, Save, Server, Settings, Trash2, X } from 'lucide-react';
 import { api } from '../hooks/api';
-import type { AppSettings } from '../types';
+import type { AppSettings, ModelShortcutSettings } from '../types';
+
+const EMPTY_MODEL_SHORTCUTS: ModelShortcutSettings = {
+  haiku: '',
+  sonnet: '',
+  opus: '',
+};
+
+const MODEL_SHORTCUT_FIELDS: Array<{
+  key: keyof ModelShortcutSettings;
+  label: string;
+  placeholder: string;
+}> = [
+  { key: 'haiku', label: 'Haiku', placeholder: 'claude-3-5-haiku-20241022' },
+  { key: 'sonnet', label: 'Sonnet', placeholder: 'claude-sonnet-4-20250514' },
+  { key: 'opus', label: 'Opus', placeholder: 'claude-opus-4-1-20250805' },
+];
 
 export function SettingsPage() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [apiKey, setApiKey] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
-  const [modelsText, setModelsText] = useState('');
+  const [modelShortcuts, setModelShortcuts] = useState<ModelShortcutSettings>(EMPTY_MODEL_SHORTCUTS);
+  const [customModels, setCustomModels] = useState<string[]>([]);
   const [clearApiKey, setClearApiKey] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -22,7 +39,8 @@ export function SettingsPage() {
         if (cancelled) return;
         setSettings(data);
         setBaseUrl(data.anthropicBaseUrl);
-        setModelsText(data.modelsText);
+        setModelShortcuts(data.modelShortcuts ?? EMPTY_MODEL_SHORTCUTS);
+        setCustomModels(data.customModels ?? []);
       })
       .catch((err: any) => {
         if (!cancelled) setError(err.message);
@@ -42,11 +60,13 @@ export function SettingsPage() {
         ...(apiKey.trim() ? { anthropicApiKey: apiKey.trim() } : {}),
         clearAnthropicApiKey: clearApiKey,
         anthropicBaseUrl: baseUrl,
-        modelsText,
+        modelShortcuts,
+        customModels,
       });
       setSettings(next);
       setBaseUrl(next.anthropicBaseUrl);
-      setModelsText(next.modelsText);
+      setModelShortcuts(next.modelShortcuts ?? EMPTY_MODEL_SHORTCUTS);
+      setCustomModels(next.customModels ?? []);
       setApiKey('');
       setClearApiKey(false);
       setSaved(true);
@@ -55,6 +75,22 @@ export function SettingsPage() {
     } finally {
       setSaving(false);
     }
+  };
+
+  const updateShortcut = (key: keyof ModelShortcutSettings, value: string) => {
+    setModelShortcuts(prev => ({ ...prev, [key]: value }));
+  };
+
+  const updateCustomModel = (index: number, value: string) => {
+    setCustomModels(prev => prev.map((model, i) => i === index ? value : model));
+  };
+
+  const addCustomModel = () => {
+    setCustomModels(prev => [...prev, '']);
+  };
+
+  const removeCustomModel = (index: number) => {
+    setCustomModels(prev => prev.filter((_, i) => i !== index));
   };
 
   if (loading) {
@@ -155,20 +191,58 @@ export function SettingsPage() {
             <Cpu size={15} />
             <div>
               <h4>Models</h4>
-              <p>Override the model list shown in model pickers. Leave blank to use SDK discovery and fallback options.</p>
+              <p>Map common labels to exact model names, then add any extra model names as plain entries.</p>
             </div>
           </div>
 
-          <label className="settings-field">
-            <span className="settings-label">Available Models</span>
-            <textarea
-              className="textarea settings-models-input"
-              value={modelsText}
-              placeholder={'sonnet\nopus\nhaiku\nclaude-3-5-sonnet-latest | Sonnet 3.5 | Balanced coding model'}
-              onChange={e => setModelsText(e.target.value)}
-              rows={8}
-            />
-          </label>
+          <div className="settings-model-shortcuts">
+            {MODEL_SHORTCUT_FIELDS.map(field => (
+              <label className="settings-field" key={field.key}>
+                <span className="settings-label">{field.label}</span>
+                <input
+                  className="input"
+                  value={modelShortcuts[field.key]}
+                  placeholder={field.placeholder}
+                  onChange={e => updateShortcut(field.key, e.target.value)}
+                />
+              </label>
+            ))}
+          </div>
+
+          <div className="settings-custom-models">
+            <div className="settings-custom-models-header">
+              <span className="settings-label">Other Models</span>
+              <button className="btn settings-add-model-btn" type="button" onClick={addCustomModel}>
+                <Plus size={13} />
+                Add Model
+              </button>
+            </div>
+
+            {customModels.length === 0 ? (
+              <div className="settings-empty-models">No additional models configured.</div>
+            ) : (
+              <div className="settings-custom-model-list">
+                {customModels.map((model, index) => (
+                  <div className="settings-custom-model-row" key={index}>
+                    <input
+                      className="input"
+                      value={model}
+                      placeholder="claude-3-7-sonnet-latest"
+                      onChange={e => updateCustomModel(index, e.target.value)}
+                    />
+                    <button
+                      className="btn btn-icon settings-remove-model-btn"
+                      type="button"
+                      title="Remove model"
+                      onClick={() => removeCustomModel(index)}
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
 
         <p className="settings-note">

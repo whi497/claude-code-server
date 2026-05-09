@@ -5,7 +5,7 @@ import { useAttachments } from '../hooks/useAttachments';
 import { SuggestionDropdown } from './SuggestionDropdown';
 import { AttachmentPreview } from './AttachmentPreview';
 import { AttachmentBadge } from './AttachmentPreview';
-import { ThinkingToolbar, ModelPickerModal, getModelDisplayName } from './PromptControls';
+import { ContextToolbar, ThinkingToolbar, ModelPickerModal, getModelDisplayName } from './PromptControls';
 import type { Job, LogEntry, ThinkingConfig, EffortLevel, ModelOption } from '../types';
 import { Square, Archive, Play, FolderTree, ScrollText, MessageSquare, ChevronDown, ChevronRight, Wrench, Terminal, FileText, Search, Edit3, PenTool, Globe, Bot, FileCode, Copy, BookOpen, Clock, Save, X, Folder, FolderOpen, File, RefreshCw, GitBranch, Plus, Upload, Download, Check, Undo2, Star, Maximize2, ListPlus, Brain, Paperclip, Cpu, AlertTriangle } from 'lucide-react';
 import { renderInline, isTableRow, isTableSeparator, renderTable, renderMarkdown } from './Markdown';
@@ -23,6 +23,26 @@ interface Props {
 
 function formatTime(iso: string) {
   return new Date(iso).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+const DEFAULT_CONTEXT_WINDOW_TOKENS = 200_000;
+const ONE_MILLION_CONTEXT_WINDOW_TOKENS = 1_000_000;
+
+function buildContextUsage(job: Job) {
+  if (!job.tokenUsage) return null;
+  const used = job.tokenUsage.input + job.tokenUsage.output;
+  const limit = job.context?.oneMillion
+    ? ONE_MILLION_CONTEXT_WINDOW_TOKENS
+    : DEFAULT_CONTEXT_WINDOW_TOKENS;
+  const ratio = limit > 0 ? Math.min(1, used / limit) : 0;
+  const percent = Math.max(1, Math.round(ratio * 100));
+  const filled = Math.max(0, Math.min(10, Math.round(ratio * 10)));
+  return {
+    used,
+    limit,
+    percent,
+    bar: `${'█'.repeat(filled)}${'░'.repeat(10 - filled)}`,
+  };
 }
 
 // ── Chat message grouping (ordered parts) ────────────────────
@@ -1208,6 +1228,7 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
   const [inputThinkingEnabled, setInputThinkingEnabled] = useState(() => job.thinking?.type === 'enabled');
   const [inputThinkingEffort, setInputThinkingEffort] = useState<EffortLevel>(() => (job.thinking?.type === 'enabled' && job.thinking.effort) || 'medium');
   const [inputThinkingBudget, setInputThinkingBudget] = useState(() => (job.thinking?.type === 'enabled' && job.thinking.budgetTokens) || 10000);
+  const [inputContextOneMillion, setInputContextOneMillion] = useState(() => job.context?.oneMillion === true);
   const [memorySections, setMemorySections] = useState<any[] | null>(null);
   const [selectedMemory, setSelectedMemory] = useState<string | null>(null);
   const [editingMemory, setEditingMemory] = useState<{ filePath: string; content: string } | null>(null);
@@ -1235,6 +1256,7 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([]);
   const [modelPickerLoading, setModelPickerLoading] = useState(false);
   const [currentModel, setCurrentModel] = useState<string>(job.model ?? 'default');
+  const [currentModelDisplayName, setCurrentModelDisplayName] = useState<string | undefined>(job.modelDisplayName);
   const termRef = useRef<HTMLDivElement>(null);
   const chatRef = useRef<HTMLDivElement>(null);
   const userScrolledUpRef = useRef(false);
@@ -1251,7 +1273,9 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
 
   useEffect(() => {
     setCurrentModel(job.model ?? 'default');
-  }, [job.id, job.model]);
+    setCurrentModelDisplayName(job.modelDisplayName);
+    setInputContextOneMillion(job.context?.oneMillion === true);
+  }, [job.id, job.model, job.modelDisplayName, job.context?.oneMillion]);
 
   // Commands for / suggestions — contextual to current job state
   const suggestionCommands = useMemo<CommandDef[]>(() => {
@@ -1348,11 +1372,12 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
     finally { setModelPickerLoading(false); }
   }, [job.id]);
 
-  const handleSelectModel = useCallback(async (modelValue: string) => {
+  const handleSelectModel = useCallback(async (model: ModelOption) => {
     setModelPickerOpen(false);
     try {
-      await api.switchModel(job.id, modelValue);
-      setCurrentModel(modelValue);
+      await api.switchModel(job.id, model.value, model.displayName);
+      setCurrentModel(model.value);
+      setCurrentModelDisplayName(model.displayName);
     } catch (e) { console.error(e); }
   }, [job.id]);
 
@@ -1504,6 +1529,10 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
     setInputThinkingBudget(budget);
     api.updateJobThinking(job.id, { type: 'enabled', budgetTokens: budget, effort: inputThinkingEffort }).catch(console.error);
   };
+  const handleContextToggle = (enabled: boolean) => {
+    setInputContextOneMillion(enabled);
+    api.updateJobContext(job.id, enabled ? { oneMillion: true } : null).catch(console.error);
+  };
 
   const handleSend = () => {
     if (!followUp.trim() || suggestions.isOpen) return;
@@ -1513,8 +1542,9 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
       if (inputRef.current) inputRef.current.style.height = 'auto';
     };
     const thinking = buildThinkingConfig();
+    const context = inputContextOneMillion ? { oneMillion: true } : undefined;
     const sendAttachments = attach.attachments.length > 0 ? attach.attachments : undefined;
-    api.continueJob(job.id, followUp, thinking, currentModel, sendAttachments).then(resetTextarea).catch(console.error);
+    api.continueJob(job.id, followUp, thinking, context, currentModel, currentModelDisplayName, sendAttachments).then(resetTextarea).catch(console.error);
   };
 
   // ── Fork handlers ──
@@ -1641,6 +1671,7 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
       : canResumeWithContext
         ? 'Continue'
         : 'New Turn';
+  const contextUsage = buildContextUsage(job);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
@@ -1744,10 +1775,20 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
           );
         })()}
         {job.tokenUsage && (
-          <div className="flex gap-3 text-sm text-muted" style={{ marginTop: 8 }}>
+          <div className="job-usage-row">
             <span>Tokens: {(job.tokenUsage.input + job.tokenUsage.output).toLocaleString()}</span>
             {job.costUsd != null && <span>Cost: ${job.costUsd.toFixed(4)}</span>}
             {job.sessionId && <span>Session: {job.sessionId.slice(0, 8)}</span>}
+            {contextUsage && (
+              <span
+                className="ctx-usage"
+                title={`Estimated context usage: ${contextUsage.used.toLocaleString()} / ${contextUsage.limit.toLocaleString()} tokens`}
+              >
+                <span>ctx</span>
+                <span className="ctx-usage-bar">[{contextUsage.bar}]</span>
+                <span>{contextUsage.percent}%</span>
+              </span>
+            )}
           </div>
         )}
       </div>
@@ -1892,6 +1933,10 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
                     onEffortChange={handleThinkingEffortChange}
                     onBudgetChange={handleThinkingBudgetChange}
                   />
+                  <ContextToolbar
+                    oneMillion={inputContextOneMillion}
+                    onToggle={handleContextToggle}
+                  />
                   {showModelSelector && (
                     <button
                       type="button"
@@ -1900,7 +1945,7 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
                       title="Switch model"
                     >
                       <Cpu size={13} />
-                      <span>{getModelDisplayName(currentModel, availableModels)}</span>
+                      <span>{getModelDisplayName(currentModel, availableModels, currentModelDisplayName)}</span>
                     </button>
                   )}
                 </div>
@@ -2004,6 +2049,10 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
                     onEffortChange={handleThinkingEffortChange}
                     onBudgetChange={handleThinkingBudgetChange}
                   />
+                  <ContextToolbar
+                    oneMillion={inputContextOneMillion}
+                    onToggle={handleContextToggle}
+                  />
                   {showModelSelector && (
                     <button
                       type="button"
@@ -2012,7 +2061,7 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
                       title="Switch model"
                     >
                       <Cpu size={13} />
-                      <span>{getModelDisplayName(currentModel, availableModels)}</span>
+                      <span>{getModelDisplayName(currentModel, availableModels, currentModelDisplayName)}</span>
                     </button>
                   )}
                 </div>
@@ -2599,6 +2648,7 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
         models={availableModels}
         loading={modelPickerLoading}
         currentValue={currentModel}
+        currentDisplayName={currentModelDisplayName}
         title={isRunning || isIdle ? 'Switch Model' : 'Select Model For Next Run'}
         emptyMessage="No models available."
         onSelect={handleSelectModel}

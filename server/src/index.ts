@@ -10,7 +10,7 @@ import { promisify } from 'util';
 import * as pty from 'node-pty';
 import { query, forkSession, getSessionMessages } from '@anthropic-ai/claude-agent-sdk';
 import { createRequire } from 'module';
-import type { Job, Project, LogEntry, JobStatus, ApprovalRequest, ApprovalResponse, ApprovalType, ApprovalStatus, ImportProgress, ImportResult, LocalProject, Attachment, AttachmentMediaType, AppSettings, ModelOption } from './types.js';
+import type { Job, Project, LogEntry, JobStatus, ApprovalRequest, ApprovalResponse, ApprovalType, ApprovalStatus, ImportProgress, ImportResult, LocalProject, Attachment, AttachmentMediaType, AppSettings, ModelOption, ModelShortcutSettings } from './types.js';
 import { discoverLocalProjects, parseClaudeSession } from './claude-importer.js';
 
 // Resolve the SDK's built-in CLI path at startup (before cwd changes).
@@ -64,6 +64,34 @@ const DEFAULT_REPO_ROOT = fs.existsSync(path.join(process.cwd(), 'server', 'src'
 const REPO_ROOT = path.resolve(process.env.PROJECT_ROOT ?? DEFAULT_REPO_ROOT);
 const ENV_FILE = path.join(REPO_ROOT, '.env');
 const CUSTOM_MODELS_ENV = 'CLAUDE_CODE_SERVER_MODELS';
+const MODEL_SHORTCUT_KEYS = ['haiku', 'sonnet', 'opus'] as const;
+type ModelShortcutKey = typeof MODEL_SHORTCUT_KEYS[number];
+type ModelSettingsInput = Partial<Record<ModelShortcutKey, unknown>>;
+
+const EMPTY_MODEL_SHORTCUTS: ModelShortcutSettings = {
+  haiku: '',
+  sonnet: '',
+  opus: '',
+};
+
+const MODEL_SHORTCUT_META: Record<ModelShortcutKey, { displayName: string; fallbackValue: string; description: string }> = {
+  haiku: {
+    displayName: 'Haiku',
+    fallbackValue: 'haiku',
+    description: 'Fast lightweight Claude Code model alias.',
+  },
+  sonnet: {
+    displayName: 'Sonnet',
+    fallbackValue: 'sonnet',
+    description: 'Balanced Claude Code model alias for daily coding work.',
+  },
+  opus: {
+    displayName: 'Opus',
+    fallbackValue: 'opus',
+    description: 'Most capable Claude Code model alias for complex work.',
+  },
+};
+const ONE_MILLION_CONTEXT_BETA = 'context-1m-2025-08-07' as const;
 
 function parseEnvValue(raw: string): string {
   const trimmed = raw.trim();
@@ -135,7 +163,6 @@ function maskSecret(value: string | undefined): string | undefined {
 }
 
 function parseConfiguredModels(raw = process.env[CUSTOM_MODELS_ENV] ?? ''): ModelOption[] {
-  const seen = new Set<string>();
   return raw
     .split(/[\n,]/)
     .map(part => part.trim())
@@ -148,19 +175,93 @@ function parseConfiguredModels(raw = process.env[CUSTOM_MODELS_ENV] ?? ''): Mode
         description: descriptionPart || 'Configured in app settings.',
       };
     })
-    .filter((model) => {
-      if (!model.value || seen.has(model.value)) return false;
-      seen.add(model.value);
-      return true;
-    });
+    .filter((model) => Boolean(model.value));
+}
+
+function emptyModelShortcuts(): ModelShortcutSettings {
+  return { ...EMPTY_MODEL_SHORTCUTS };
+}
+
+function normalizeShortcutName(value: string): ModelShortcutKey | undefined {
+  const normalized = value.trim().toLowerCase();
+  return MODEL_SHORTCUT_KEYS.find(key => key === normalized);
+}
+
+function parseModelSettings(raw = process.env[CUSTOM_MODELS_ENV] ?? ''): { modelShortcuts: ModelShortcutSettings; customModels: string[] } {
+  const modelShortcuts = emptyModelShortcuts();
+  const customModels: string[] = [];
+  const seenCustom = new Set<string>();
+
+  for (const model of parseConfiguredModels(raw)) {
+    const shortcutKey = normalizeShortcutName(model.displayName) ?? normalizeShortcutName(model.value);
+    if (shortcutKey) {
+      modelShortcuts[shortcutKey] = model.value;
+      continue;
+    }
+    if (!seenCustom.has(model.value)) {
+      customModels.push(model.value);
+      seenCustom.add(model.value);
+    }
+  }
+
+  return { modelShortcuts, customModels };
+}
+
+function normalizeModelShortcutSettings(input: unknown): ModelShortcutSettings {
+  if (!input || typeof input !== 'object') return emptyModelShortcuts();
+  const source = input as ModelSettingsInput;
+  const next = emptyModelShortcuts();
+  for (const key of MODEL_SHORTCUT_KEYS) {
+    const value = source[key];
+    next[key] = typeof value === 'string' ? value.trim() : '';
+  }
+  return next;
+}
+
+function normalizeCustomModels(input: unknown): string[] {
+  if (!Array.isArray(input)) return [];
+  const seen = new Set<string>();
+  const models: string[] = [];
+  for (const value of input) {
+    if (typeof value !== 'string') continue;
+    const trimmed = value.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    models.push(trimmed);
+  }
+  return models;
+}
+
+function serializeModelSettings(modelShortcuts: ModelShortcutSettings, customModels: string[]): string {
+  const lines: string[] = [];
+
+  for (const key of MODEL_SHORTCUT_KEYS) {
+    const value = modelShortcuts[key].trim();
+    if (!value) continue;
+    const meta = MODEL_SHORTCUT_META[key];
+    lines.push(`${value} | ${meta.displayName} | ${meta.description}`);
+  }
+
+  const seenCustomValues = new Set<string>();
+  for (const value of customModels) {
+    const trimmed = value.trim();
+    if (!trimmed || seenCustomValues.has(trimmed)) continue;
+    seenCustomValues.add(trimmed);
+    lines.push(trimmed);
+  }
+
+  return lines.join('\n');
 }
 
 function getAppSettings(): AppSettings {
+  const modelSettings = parseModelSettings();
   return {
     anthropicApiKeySet: Boolean(process.env.ANTHROPIC_API_KEY),
     anthropicApiKeyPreview: maskSecret(process.env.ANTHROPIC_API_KEY),
     anthropicBaseUrl: process.env.ANTHROPIC_BASE_URL ?? '',
     modelsText: process.env[CUSTOM_MODELS_ENV] ?? '',
+    modelShortcuts: modelSettings.modelShortcuts,
+    customModels: modelSettings.customModels,
     models: parseConfiguredModels(),
   };
 }
@@ -597,17 +698,10 @@ interface RunJobOptions {
   activateOnly?: boolean;
 }
 
-const DEFAULT_MODEL_OPTION: ModelOption = {
-  value: 'default',
-  displayName: 'Default',
-  description: 'Use the Claude Code default model for new turns.',
-};
-
 const FALLBACK_MODEL_OPTIONS: ModelOption[] = [
-  DEFAULT_MODEL_OPTION,
+  { value: 'haiku', displayName: 'Haiku', description: 'Fastest lightweight model for simpler or lower-latency work.' },
   { value: 'sonnet', displayName: 'Sonnet', description: 'Balanced speed and capability for most coding work.' },
   { value: 'opus', displayName: 'Opus', description: 'Highest capability for more complex reasoning and coding tasks.' },
-  { value: 'haiku', displayName: 'Haiku', description: 'Fastest lightweight model for simpler or lower-latency work.' },
 ];
 
 function normalizeJobModel(model: unknown): string | undefined {
@@ -617,31 +711,62 @@ function normalizeJobModel(model: unknown): string | undefined {
   return trimmed;
 }
 
-function ensureModelOption(models: ModelOption[], model?: string): ModelOption[] {
-  if (!model || models.some(m => m.value === model)) return models;
-  return [{ value: model, displayName: model, description: 'Previously selected model.' }, ...models];
+function normalizeModelDisplayName(displayName: unknown): string | undefined {
+  if (typeof displayName !== 'string') return undefined;
+  const trimmed = displayName.trim();
+  return trimmed || undefined;
 }
 
-function withDefaultModel(models: ModelOption[]): ModelOption[] {
-  return models.some(m => m.value === DEFAULT_MODEL_OPTION.value)
-    ? models
-    : [DEFAULT_MODEL_OPTION, ...models];
+function ensureModelOption(models: ModelOption[], model?: string, displayName?: string): ModelOption[] {
+  if (!model || models.some(m => m.value === model && (!displayName || m.displayName === displayName))) return models;
+  return [{ value: model, displayName: displayName ?? model, description: 'Previously selected model.' }, ...models];
 }
 
-async function getModelOptions(session?: { queryHandle?: any }, selectedModel?: string): Promise<ModelOption[]> {
-  const configuredModels = parseConfiguredModels();
-  if (configuredModels.length > 0) {
-    return withDefaultModel(ensureModelOption(configuredModels, selectedModel));
-  }
-  if (session?.queryHandle?.supportedModels) {
-    try {
-      const models = await session.queryHandle.supportedModels();
-      return withDefaultModel(ensureModelOption(models, selectedModel));
-    } catch {
-      // Fall through to static fallback list
+function mergeModelOptions(...groups: ModelOption[][]): ModelOption[] {
+  const seenDisplayNames = new Set<string>();
+  const merged: ModelOption[] = [];
+  for (const group of groups) {
+    for (const model of group) {
+      const displayKey = model.displayName.trim().toLowerCase();
+      if (!model.value || seenDisplayNames.has(displayKey)) continue;
+      seenDisplayNames.add(displayKey);
+      merged.push(model);
     }
   }
-  return ensureModelOption(FALLBACK_MODEL_OPTIONS, selectedModel);
+  return merged;
+}
+
+function buildConfiguredModelOptions(): ModelOption[] {
+  const { modelShortcuts, customModels } = parseModelSettings();
+  const options: ModelOption[] = [];
+
+  for (const key of MODEL_SHORTCUT_KEYS) {
+    const meta = MODEL_SHORTCUT_META[key];
+    const configuredValue = modelShortcuts[key].trim();
+    const value = configuredValue || meta.fallbackValue;
+    options.push({
+      value,
+      displayName: meta.displayName,
+      description: configuredValue
+        ? `Uses ${configuredValue}.`
+        : meta.description,
+    });
+  }
+
+  for (const value of customModels) {
+    options.push({
+      value,
+      displayName: value,
+      description: 'Custom model configured in app settings.',
+    });
+  }
+
+  return options;
+}
+
+async function getModelOptions(_session?: { queryHandle?: any }, selectedModel?: string, selectedDisplayName?: string): Promise<ModelOption[]> {
+  const configuredModels = buildConfiguredModelOptions();
+  return ensureModelOption(mergeModelOptions(configuredModels, FALLBACK_MODEL_OPTIONS), selectedModel, selectedDisplayName);
 }
 
 async function runJob(job: Job, runOptions: RunJobOptions = {}) {
@@ -699,6 +824,7 @@ async function runJob(job: Job, runOptions: RunJobOptions = {}) {
       abortController,
       ...(CLAUDE_CODE_EXECUTABLE ? { pathToClaudeCodeExecutable: CLAUDE_CODE_EXECUTABLE } : {}),
       ...(job.model ? { model: job.model } : {}),
+      ...(job.context?.oneMillion ? { betas: [ONE_MILLION_CONTEXT_BETA] } : {}),
       allowedTools: ['Read', 'Edit', 'Write', 'Bash', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode'],
       disallowedTools: [],
       // No permissionMode: 'bypassPermissions' — canUseTool handles all permissions
@@ -1072,7 +1198,7 @@ app.get('/api/settings', (_req, res) => {
 });
 
 app.put('/api/settings', async (req, res) => {
-  const { anthropicApiKey, clearAnthropicApiKey, anthropicBaseUrl, modelsText } = req.body ?? {};
+  const { anthropicApiKey, clearAnthropicApiKey, anthropicBaseUrl, modelsText, modelShortcuts, customModels } = req.body ?? {};
   const envUpdates: Record<string, string | undefined> = {};
 
   if (clearAnthropicApiKey === true) {
@@ -1105,7 +1231,22 @@ app.put('/api/settings', async (req, res) => {
     }
   }
 
-  if (modelsText !== undefined) {
+  if (modelShortcuts !== undefined || customModels !== undefined) {
+    const current = parseModelSettings();
+    const nextShortcuts = modelShortcuts !== undefined
+      ? normalizeModelShortcutSettings(modelShortcuts)
+      : current.modelShortcuts;
+    const nextCustomModels = customModels !== undefined
+      ? normalizeCustomModels(customModels)
+      : current.customModels;
+    const serialized = serializeModelSettings(nextShortcuts, nextCustomModels);
+    envUpdates[CUSTOM_MODELS_ENV] = serialized || undefined;
+    if (serialized) {
+      process.env[CUSTOM_MODELS_ENV] = serialized;
+    } else {
+      delete process.env[CUSTOM_MODELS_ENV];
+    }
+  } else if (modelsText !== undefined) {
     if (typeof modelsText !== 'string') {
       return res.status(400).json({ error: 'modelsText must be a string' });
     }
@@ -1207,7 +1348,7 @@ app.patch('/api/jobs/:id', (req, res) => {
 });
 
 app.post('/api/jobs', (req, res) => {
-  const { projectId, prompt, mode, thinking, model, attachments: rawAttachments } = req.body;
+  const { projectId, prompt, mode, thinking, context, model, modelDisplayName, attachments: rawAttachments } = req.body;
   if (!projectId || !prompt) return res.status(400).json({ error: 'projectId and prompt required' });
   if (!projects.find(p => p.id === projectId)) return res.status(404).json({ error: 'project not found' });
 
@@ -1231,10 +1372,12 @@ app.post('/api/jobs', (req, res) => {
     projectId,
     prompt,
     ...(normalizeJobModel(model) ? { model: normalizeJobModel(model) } : {}),
+    ...(normalizeJobModel(model) && normalizeModelDisplayName(modelDisplayName) ? { modelDisplayName: normalizeModelDisplayName(modelDisplayName) } : {}),
     ...(validatedAttachments ? { attachments: validatedAttachments } : {}),
     status: 'queued',
     mode: mode === 'session' ? 'session' : 'job',
     ...(thinkingConfig ? { thinking: thinkingConfig } : {}),
+    ...(context?.oneMillion === true ? { context: { oneMillion: true } } : {}),
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     lastInteractionAt: new Date().toISOString(),
@@ -1268,12 +1411,28 @@ app.put('/api/jobs/:id/thinking', (req, res) => {
   res.json(job);
 });
 
+app.put('/api/jobs/:id/context', (req, res) => {
+  const job = jobs.find(j => j.id === req.params.id);
+  if (!job) return res.status(404).json({ error: 'not found' });
+
+  const { context } = req.body ?? {};
+  if (context?.oneMillion === true) {
+    job.context = { oneMillion: true };
+  } else {
+    job.context = undefined;
+  }
+  job.updatedAt = new Date().toISOString();
+  saveState();
+  broadcast('job:updated', job);
+  res.json(job);
+});
+
 // Resume a completed/failed job OR send message to live session
 app.post('/api/jobs/:id/continue', async (req, res) => {
   const job = jobs.find(j => j.id === req.params.id);
   if (!job) return res.status(404).json({ error: 'not found' });
 
-  const { prompt, thinking, model, attachments: rawAttachments } = req.body;
+  const { prompt, thinking, context, model, modelDisplayName, attachments: rawAttachments } = req.body;
   // Update thinking config if provided with the continue request
   if (thinking !== undefined) {
     if (thinking && thinking.type === 'enabled' && typeof thinking.budgetTokens === 'number' && thinking.budgetTokens > 0) {
@@ -1284,7 +1443,16 @@ app.post('/api/jobs/:id/continue', async (req, res) => {
     }
   }
   if (model !== undefined) {
-    job.model = normalizeJobModel(model);
+    const nextModel = normalizeJobModel(model);
+    job.model = nextModel;
+    if (nextModel) {
+      job.modelDisplayName = normalizeModelDisplayName(modelDisplayName);
+    } else {
+      delete job.modelDisplayName;
+    }
+  }
+  if (context !== undefined) {
+    job.context = context?.oneMillion === true ? { oneMillion: true } : undefined;
   }
   const message = prompt ?? 'Continue from where you left off.';
 
@@ -1522,7 +1690,9 @@ app.post('/api/jobs/:id/fork', async (req, res) => {
         status: 'queued',
         mode: sourceJob.mode ?? 'job',
         ...(sourceJob.model ? { model: sourceJob.model } : {}),
+        ...(sourceJob.modelDisplayName ? { modelDisplayName: sourceJob.modelDisplayName } : {}),
         ...(sourceJob.thinking ? { thinking: sourceJob.thinking } : {}),
+        ...(sourceJob.context ? { context: sourceJob.context } : {}),
         forkedFrom: { jobId: sourceJob.id, turnIndex: 0 },
         createdAt: now,
         updatedAt: now,
@@ -1589,7 +1759,9 @@ app.post('/api/jobs/:id/fork', async (req, res) => {
       sessionId: forkedSessionId,
       mode: sourceJob.mode ?? 'job',
       ...(sourceJob.model ? { model: sourceJob.model } : {}),
+      ...(sourceJob.modelDisplayName ? { modelDisplayName: sourceJob.modelDisplayName } : {}),
       ...(sourceJob.thinking ? { thinking: sourceJob.thinking } : {}),
+      ...(sourceJob.context ? { context: sourceJob.context } : {}),
       forkedFrom: { jobId: sourceJob.id, turnIndex: targetAssistantTurnIndex },
       createdAt: now,
       updatedAt: now,
@@ -1760,15 +1932,15 @@ app.post('/api/jobs/:id/model', async (req, res) => {
   if (!job) return res.status(404).json({ error: 'not found' });
 
   const session = activeQueries.get(job.id);
-  const { model } = req.body ?? {};
+  const { model, modelDisplayName } = req.body ?? {};
 
   if (!model) {
     // List available models
     try {
-      const models = await getModelOptions(session, job.model);
+      const models = await getModelOptions(session, job.model, job.modelDisplayName);
       return res.json({ action: 'list', models });
     } catch {
-      return res.json({ action: 'list', models: await getModelOptions(undefined, job.model) });
+      return res.json({ action: 'list', models: await getModelOptions(undefined, job.model, job.modelDisplayName) });
     }
   }
 
@@ -1779,13 +1951,18 @@ app.post('/api/jobs/:id/model', async (req, res) => {
       await session.queryHandle.setModel(nextModel);
     }
     job.model = nextModel;
+    if (nextModel) {
+      job.modelDisplayName = normalizeModelDisplayName(modelDisplayName);
+    } else {
+      delete job.modelDisplayName;
+    }
     const addLog = (entry: Omit<LogEntry, 'timestamp'>) => {
       const log: LogEntry = { ...entry, timestamp: new Date().toISOString() };
       job.logs.push(log);
       broadcast('job:log', { jobId: job.id, log });
     };
     if (session?.queryHandle) {
-      addLog({ type: 'system', content: `Model switched to: ${model}` });
+      addLog({ type: 'system', content: `Model switched to: ${job.modelDisplayName ?? model}` });
     }
     job.updatedAt = new Date().toISOString();
     broadcast('job:updated', job);
@@ -1802,7 +1979,7 @@ app.get('/api/jobs/:id/models', async (req, res) => {
   if (!job) return res.status(404).json({ error: 'not found' });
 
   const session = activeQueries.get(job.id);
-  return res.json(await getModelOptions(session, job.model));
+  return res.json(await getModelOptions(session, job.model, job.modelDisplayName));
 });
 
 // GET /api/models — list global model choices for new jobs / inactive jobs

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Brain } from 'lucide-react';
+import { Brain, Maximize2 } from 'lucide-react';
 import type { EffortLevel, ModelOption } from '../types';
 
 const EFFORT_LEVELS: { value: EffortLevel; label: string }[] = [
@@ -91,15 +91,35 @@ export function ThinkingToolbar({ enabled, effort, budget, onToggle, onEffortCha
   );
 }
 
+interface ContextToolbarProps {
+  oneMillion: boolean;
+  onToggle: (enabled: boolean) => void;
+}
+
+export function ContextToolbar({ oneMillion, onToggle }: ContextToolbarProps) {
+  return (
+    <button
+      type="button"
+      className={`context-toolbar-toggle ${oneMillion ? 'active' : ''}`}
+      onClick={() => onToggle(!oneMillion)}
+      title={oneMillion ? 'Disable 1M context' : 'Enable 1M context'}
+    >
+      <Maximize2 size={12} />
+      <span>1M</span>
+    </button>
+  );
+}
+
 interface ModelPickerModalProps {
   isOpen: boolean;
   onClose: () => void;
   models: ModelOption[];
   loading: boolean;
   currentValue?: string;
+  currentDisplayName?: string;
   title?: string;
   emptyMessage?: string;
-  onSelect: (value: string) => void;
+  onSelect: (model: ModelOption) => void;
 }
 
 export function ModelPickerModal({
@@ -108,6 +128,7 @@ export function ModelPickerModal({
   models,
   loading,
   currentValue = 'default',
+  currentDisplayName,
   title = 'Select Model',
   emptyMessage = 'No models available.',
   onSelect,
@@ -116,9 +137,11 @@ export function ModelPickerModal({
 
   useEffect(() => {
     if (!isOpen) return;
-    const currentIndex = models.findIndex(m => m.value === currentValue);
+    const currentIndex = models.findIndex(m =>
+      m.value === currentValue && (!currentDisplayName || m.displayName === currentDisplayName)
+    );
     setSelectedIndex(currentIndex >= 0 ? currentIndex : 0);
-  }, [isOpen, models, currentValue]);
+  }, [isOpen, models, currentValue, currentDisplayName]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -127,7 +150,7 @@ export function ModelPickerModal({
       if (models.length === 0) return;
       if (e.key === 'ArrowDown') { e.preventDefault(); setSelectedIndex(i => (i + 1) % models.length); return; }
       if (e.key === 'ArrowUp') { e.preventDefault(); setSelectedIndex(i => (i - 1 + models.length) % models.length); return; }
-      if (e.key === 'Enter') { e.preventDefault(); onSelect(models[selectedIndex].value); }
+      if (e.key === 'Enter') { e.preventDefault(); onSelect(models[selectedIndex]); }
     };
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
@@ -147,9 +170,9 @@ export function ModelPickerModal({
           <div className="model-picker-list">
             {models.map((m, i) => (
               <div
-                key={m.value}
+                key={`${m.displayName}:${m.value}:${i}`}
                 className={`model-picker-item${i === selectedIndex ? ' selected' : ''}`}
-                onClick={() => onSelect(m.value)}
+                onClick={() => onSelect(m)}
                 onMouseEnter={() => setSelectedIndex(i)}
               >
                 <div className="model-picker-item-name">{m.displayName}</div>
@@ -168,7 +191,8 @@ export function ModelPickerModal({
   );
 }
 
-export function getModelDisplayName(modelValue: string | undefined, models: ModelOption[]) {
-  if (!modelValue || modelValue === 'default') return 'Default';
+export function getModelDisplayName(modelValue: string | undefined, models: ModelOption[], modelDisplayName?: string) {
+  if (!modelValue || modelValue === 'default') return 'Model';
+  if (modelDisplayName) return modelDisplayName;
   return models.find(m => m.value === modelValue)?.displayName || modelValue;
 }
