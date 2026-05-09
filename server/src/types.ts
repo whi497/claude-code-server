@@ -27,6 +27,20 @@ export interface Attachment {
   data: string;        // base64 (no data URI prefix)
 }
 
+export interface ModelOption {
+  value: string;
+  displayName: string;
+  description: string;
+}
+
+export interface AppSettings {
+  anthropicApiKeySet: boolean;
+  anthropicApiKeyPreview?: string;
+  anthropicBaseUrl: string;
+  modelsText: string;
+  models: ModelOption[];
+}
+
 export interface Job {
   id: string;
   projectId: string;

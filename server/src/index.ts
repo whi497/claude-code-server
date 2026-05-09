@@ -10,15 +10,39 @@ import { promisify } from 'util';
 import * as pty from 'node-pty';
 import { query, forkSession, getSessionMessages } from '@anthropic-ai/claude-agent-sdk';
 import { createRequire } from 'module';
-import type { Job, Project, LogEntry, JobStatus, ApprovalRequest, ApprovalResponse, ApprovalType, ApprovalStatus, ImportProgress, ImportResult, LocalProject, Attachment, AttachmentMediaType } from './types.js';
+import type { Job, Project, LogEntry, JobStatus, ApprovalRequest, ApprovalResponse, ApprovalType, ApprovalStatus, ImportProgress, ImportResult, LocalProject, Attachment, AttachmentMediaType, AppSettings, ModelOption } from './types.js';
 import { discoverLocalProjects, parseClaudeSession } from './claude-importer.js';
 
-// Resolve the SDK's built-in CLI path at startup (before cwd changes)
+// Resolve the SDK's built-in CLI path at startup (before cwd changes).
+// Newer SDKs ship a native optional package; older layouts used cli.js.
 const require = createRequire(import.meta.url);
-const CLAUDE_CLI_PATH = path.join(
-  path.dirname(require.resolve('@anthropic-ai/claude-agent-sdk')),
-  'cli.js'
-);
+
+function resolveClaudeCodeExecutable(): string | undefined {
+  const ext = process.platform === 'win32' ? '.exe' : '';
+  const platformPackages = process.platform === 'linux'
+    ? [
+        `@anthropic-ai/claude-agent-sdk-linux-${process.arch}-musl/claude${ext}`,
+        `@anthropic-ai/claude-agent-sdk-linux-${process.arch}/claude${ext}`,
+      ]
+    : [`@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}/claude${ext}`];
+
+  for (const packagePath of platformPackages) {
+    try {
+      return require.resolve(packagePath);
+    } catch {
+      // Try the next platform package.
+    }
+  }
+
+  try {
+    const legacyPath = path.join(path.dirname(require.resolve('@anthropic-ai/claude-agent-sdk')), 'cli.js');
+    return fs.existsSync(legacyPath) ? legacyPath : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+const CLAUDE_CODE_EXECUTABLE = resolveClaudeCodeExecutable();
 
 // ── Async fs alias ─────────────────────────────────────────────
 const fsp = fs.promises;
@@ -32,6 +56,116 @@ const SKIP_DIRS = new Set([
 ]);
 const MAX_DIR_ENTRIES = 200;   // per-directory cap
 const MAX_TOTAL_FILES = 5000;  // global cap for file tree
+
+// ── Runtime settings ─────────────────────────────────────────────
+const DEFAULT_REPO_ROOT = fs.existsSync(path.join(process.cwd(), 'server', 'src'))
+  ? process.cwd()
+  : path.resolve(process.cwd(), '..');
+const REPO_ROOT = path.resolve(process.env.PROJECT_ROOT ?? DEFAULT_REPO_ROOT);
+const ENV_FILE = path.join(REPO_ROOT, '.env');
+const CUSTOM_MODELS_ENV = 'CLAUDE_CODE_SERVER_MODELS';
+
+function parseEnvValue(raw: string): string {
+  const trimmed = raw.trim();
+  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+    const unquoted = trimmed.slice(1, -1);
+    return trimmed.startsWith('"')
+      ? unquoted.replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\')
+      : unquoted;
+  }
+  return trimmed;
+}
+
+function loadEnvFile() {
+  if (!fs.existsSync(ENV_FILE)) return;
+  const lines = fs.readFileSync(ENV_FILE, 'utf-8').split(/\r?\n/);
+  for (const line of lines) {
+    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
+    if (!match) continue;
+    const [, key, rawValue] = match;
+    if (process.env[key] === undefined) {
+      process.env[key] = parseEnvValue(rawValue);
+    }
+  }
+}
+
+function serializeEnvValue(value: string): string {
+  if (/^[A-Za-z0-9_./:@-]*$/.test(value)) return value;
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n')}"`;
+}
+
+async function updateEnvFile(updates: Record<string, string | undefined>) {
+  const existing = fs.existsSync(ENV_FILE)
+    ? (await fsp.readFile(ENV_FILE, 'utf-8')).split(/\r?\n/)
+    : [];
+  const seen = new Set<string>();
+  const nextLines = existing.filter((line) => {
+    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/);
+    if (!match) return true;
+    const key = match[1];
+    if (!(key in updates)) return true;
+    seen.add(key);
+    return updates[key] !== undefined;
+  }).map((line) => {
+    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/);
+    if (!match) return line;
+    const key = match[1];
+    const value = updates[key];
+    return value === undefined ? line : `${key}=${serializeEnvValue(value)}`;
+  });
+
+  for (const [key, value] of Object.entries(updates)) {
+    if (value !== undefined && !seen.has(key)) {
+      nextLines.push(`${key}=${serializeEnvValue(value)}`);
+    }
+  }
+
+  while (nextLines.length > 0 && nextLines[nextLines.length - 1] === '') {
+    nextLines.pop();
+  }
+
+  await fsp.writeFile(ENV_FILE, `${nextLines.join('\n')}\n`, { mode: 0o600 });
+  await fsp.chmod(ENV_FILE, 0o600).catch(() => {});
+}
+
+function maskSecret(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  if (value.length <= 8) return '••••';
+  return `${value.slice(0, 4)}••••${value.slice(-4)}`;
+}
+
+function parseConfiguredModels(raw = process.env[CUSTOM_MODELS_ENV] ?? ''): ModelOption[] {
+  const seen = new Set<string>();
+  return raw
+    .split(/[\n,]/)
+    .map(part => part.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [valuePart, displayPart, descriptionPart] = line.split('|').map(part => part.trim());
+      return {
+        value: valuePart,
+        displayName: displayPart || valuePart,
+        description: descriptionPart || 'Configured in app settings.',
+      };
+    })
+    .filter((model) => {
+      if (!model.value || seen.has(model.value)) return false;
+      seen.add(model.value);
+      return true;
+    });
+}
+
+function getAppSettings(): AppSettings {
+  return {
+    anthropicApiKeySet: Boolean(process.env.ANTHROPIC_API_KEY),
+    anthropicApiKeyPreview: maskSecret(process.env.ANTHROPIC_API_KEY),
+    anthropicBaseUrl: process.env.ANTHROPIC_BASE_URL ?? '',
+    modelsText: process.env[CUSTOM_MODELS_ENV] ?? '',
+    models: parseConfiguredModels(),
+  };
+}
+
+loadEnvFile();
 
 // ── Config ──────────────────────────────────────────────────────
 const PORT = Number(process.env.PORT ?? 3001);
@@ -444,6 +578,10 @@ function buildUserContent(text: string, attachments?: Attachment[] | null): stri
   ];
 }
 
+function stripAnsi(value: string): string {
+  return value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
+}
+
 /** Strip base64 data from attachments for persistence (keep metadata only). */
 function stripAttachmentData(attachments?: Attachment[]): Attachment[] | undefined {
   if (!attachments?.length) return undefined;
@@ -458,12 +596,6 @@ function stripAttachmentData(attachments?: Attachment[]): Attachment[] | undefin
 interface RunJobOptions {
   activateOnly?: boolean;
 }
-
-type ModelOption = {
-  value: string;
-  displayName: string;
-  description: string;
-};
 
 const DEFAULT_MODEL_OPTION: ModelOption = {
   value: 'default',
@@ -497,6 +629,10 @@ function withDefaultModel(models: ModelOption[]): ModelOption[] {
 }
 
 async function getModelOptions(session?: { queryHandle?: any }, selectedModel?: string): Promise<ModelOption[]> {
+  const configuredModels = parseConfiguredModels();
+  if (configuredModels.length > 0) {
+    return withDefaultModel(ensureModelOption(configuredModels, selectedModel));
+  }
   if (session?.queryHandle?.supportedModels) {
     try {
       const models = await session.queryHandle.supportedModels();
@@ -538,6 +674,14 @@ async function runJob(job: Job, runOptions: RunJobOptions = {}) {
     job.logs.push(log);
     broadcast('job:log', { jobId: job.id, log });
   };
+  const stderrChunks: string[] = [];
+  const addStderrLog = (data: string) => {
+    const content = stripAnsi(data).trim();
+    if (!content) return;
+    stderrChunks.push(content);
+    if (stderrChunks.join('\n').length > 20000) stderrChunks.shift();
+    addLog({ type: 'error', content: content.slice(0, 4000), meta: { source: 'claude_stderr' } });
+  };
 
   const markIdle = (message?: string) => {
     clearIdleTimer(job.id);
@@ -553,7 +697,7 @@ async function runJob(job: Job, runOptions: RunJobOptions = {}) {
     const opts: Parameters<typeof query>[0]['options'] = {
       cwd,
       abortController,
-      pathToClaudeCodeExecutable: CLAUDE_CLI_PATH,
+      ...(CLAUDE_CODE_EXECUTABLE ? { pathToClaudeCodeExecutable: CLAUDE_CODE_EXECUTABLE } : {}),
       ...(job.model ? { model: job.model } : {}),
       allowedTools: ['Read', 'Edit', 'Write', 'Bash', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode'],
       disallowedTools: [],
@@ -565,6 +709,7 @@ async function runJob(job: Job, runOptions: RunJobOptions = {}) {
         : { type: 'disabled' },
       ...(job.thinking?.type === 'enabled' && job.thinking.effort ? { effort: job.thinking.effort } : {}),
       canUseTool: createCanUseTool(job.id, job.projectId),
+      stderr: addStderrLog,
       // Override PermissionRequest hooks from user settings.json — the server's canUseTool
       // callback is the sole permission authority. Without this, hooks like tlive's
       // PermissionRequest hook-handler.mjs would run in parallel, causing tools like
@@ -816,8 +961,22 @@ async function runJob(job: Job, runOptions: RunJobOptions = {}) {
       broadcast('job:updated', job);
     }
   } catch (err: any) {
+    const message = err.message ?? String(err);
+    const isSuccessfulCleanupAbort =
+      message === 'Claude Code process aborted by user'
+      && Boolean(job.result)
+      && job.status === 'idle'
+      && job.mode !== 'session';
+    if (isSuccessfulCleanupAbort) {
+      // Native SDK processes can report an abort during post-result cleanup.
+      // Keep the successful result; the finally block will move idle -> completed.
+      return;
+    }
     job.status = 'failed';
-    job.error = err.message ?? String(err);
+    const stderrTail = stderrChunks.slice(-3).join('\n').trim();
+    job.error = stderrTail && !message.includes(stderrTail)
+      ? `${message}\n${stderrTail}`
+      : message;
     addLog({ type: 'error', content: job.error! });
   } finally {
     clearIdleTimer(job.id);
@@ -906,6 +1065,66 @@ function isSchedulingToolUse(toolName: string, input: unknown): boolean {
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '20mb' }));
+
+// App settings
+app.get('/api/settings', (_req, res) => {
+  res.json(getAppSettings());
+});
+
+app.put('/api/settings', async (req, res) => {
+  const { anthropicApiKey, clearAnthropicApiKey, anthropicBaseUrl, modelsText } = req.body ?? {};
+  const envUpdates: Record<string, string | undefined> = {};
+
+  if (clearAnthropicApiKey === true) {
+    envUpdates.ANTHROPIC_API_KEY = undefined;
+    delete process.env.ANTHROPIC_API_KEY;
+  } else if (typeof anthropicApiKey === 'string' && anthropicApiKey.trim()) {
+    envUpdates.ANTHROPIC_API_KEY = anthropicApiKey.trim();
+    process.env.ANTHROPIC_API_KEY = anthropicApiKey.trim();
+  }
+
+  if (anthropicBaseUrl !== undefined) {
+    if (typeof anthropicBaseUrl !== 'string') {
+      return res.status(400).json({ error: 'anthropicBaseUrl must be a string' });
+    }
+    const trimmed = anthropicBaseUrl.trim();
+    if (trimmed) {
+      try {
+        const parsed = new URL(trimmed);
+        if (!['http:', 'https:'].includes(parsed.protocol)) {
+          return res.status(400).json({ error: 'Base URL must use http or https' });
+        }
+      } catch {
+        return res.status(400).json({ error: 'Base URL must be a valid URL' });
+      }
+      envUpdates.ANTHROPIC_BASE_URL = trimmed;
+      process.env.ANTHROPIC_BASE_URL = trimmed;
+    } else {
+      envUpdates.ANTHROPIC_BASE_URL = undefined;
+      delete process.env.ANTHROPIC_BASE_URL;
+    }
+  }
+
+  if (modelsText !== undefined) {
+    if (typeof modelsText !== 'string') {
+      return res.status(400).json({ error: 'modelsText must be a string' });
+    }
+    const trimmed = modelsText.trim();
+    envUpdates[CUSTOM_MODELS_ENV] = trimmed || undefined;
+    if (trimmed) {
+      process.env[CUSTOM_MODELS_ENV] = trimmed;
+    } else {
+      delete process.env[CUSTOM_MODELS_ENV];
+    }
+  }
+
+  try {
+    await updateEnvFile(envUpdates);
+    res.json(getAppSettings());
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // Projects CRUD
 app.get('/api/projects', (_req, res) => res.json(projects));
@@ -1549,7 +1768,7 @@ app.post('/api/jobs/:id/model', async (req, res) => {
       const models = await getModelOptions(session, job.model);
       return res.json({ action: 'list', models });
     } catch {
-      return res.json({ action: 'list', models: FALLBACK_MODEL_OPTIONS });
+      return res.json({ action: 'list', models: await getModelOptions(undefined, job.model) });
     }
   }
 

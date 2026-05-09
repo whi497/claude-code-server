@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { FolderOpen, Plus, MessageCircleQuestion, ClipboardCheck, Search, Download, Archive, ArchiveRestore, MoreHorizontal, ChevronDown, ChevronRight, Check, X, Square, Sun, Moon } from 'lucide-react';
+import { FolderOpen, Plus, MessageCircleQuestion, ClipboardCheck, Search, Download, Archive, ArchiveRestore, MoreHorizontal, ChevronDown, ChevronRight, Check, X, Square, Sun, Moon, Settings } from 'lucide-react';
 import type { Project, Job, ApprovalRequest } from '../types';
 import { api } from '../hooks/api';
 
@@ -12,6 +12,7 @@ interface Props {
   selectedJobId: string | null;
   selectedApprovalId: string | null;
   isApprovalView: boolean;
+  isSettingsView: boolean;
   connected: boolean;
   onSelectProject: (id: string) => void;
   onSelectJob: (projectId: string, jobId: string) => void;
@@ -19,6 +20,7 @@ interface Props {
   onSelectApprovalView: () => void;
   onNewProject: () => void;
   onOpenSearch?: () => void;
+  onOpenSettings?: () => void;
   onImport?: () => void;
   onArchiveProject?: (id: string) => void;
   onUnarchiveProject?: (id: string) => void;
@@ -35,8 +37,8 @@ const typeIcons: Record<string, typeof MessageCircleQuestion> = {
 export function Sidebar({
   projects, jobs, approvals, pendingApprovals,
   selectedProjectId, selectedJobId, selectedApprovalId, isApprovalView,
-  connected, onSelectProject, onSelectJob, onSelectApproval, onSelectApprovalView,
-  onNewProject, onOpenSearch, onImport, onArchiveProject, onUnarchiveProject, theme, onToggleTheme, style,
+  isSettingsView, connected, onSelectProject, onSelectJob, onSelectApproval, onSelectApprovalView,
+  onNewProject, onOpenSearch, onOpenSettings, onImport, onArchiveProject, onUnarchiveProject, theme, onToggleTheme, style,
 }: Props) {
   const [contextMenu, setContextMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const [showArchivedProjects, setShowArchivedProjects] = useState(false);
@@ -387,6 +389,17 @@ export function Sidebar({
           )}
         </>
       )}
+
+      <div className="sidebar-footer">
+        <button
+          className={`sidebar-settings-btn${isSettingsView ? ' active' : ''}`}
+          onClick={onOpenSettings}
+          title="Settings"
+        >
+          <Settings size={14} />
+          <span>Settings</span>
+        </button>
+      </div>
 
       {/* Context menu */}
       {contextMenu && onArchiveProject && (

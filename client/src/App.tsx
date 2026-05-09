@@ -12,14 +12,15 @@ import { NewJobModal } from './components/NewJobModal';
 import { NewProjectModal } from './components/NewProjectModal';
 import { ImportModal } from './components/ImportModal';
 import { CommandPalette } from './components/CommandPalette';
-import { Terminal as TerminalIcon, Plus, ClipboardCheck, Search, Archive, ArchiveRestore, Download } from 'lucide-react';
+import { SettingsPage } from './components/SettingsPage';
+import { Terminal as TerminalIcon, Plus, ClipboardCheck, Search, Archive, ArchiveRestore, Download, Settings } from 'lucide-react';
 
 export default function App() {
   const store = useStore();
   const { theme, toggleTheme } = useTheme();
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
-  const [selectedView, setSelectedView] = useState<'project' | 'approvals'>('project');
+  const [selectedView, setSelectedView] = useState<'project' | 'approvals' | 'settings'>('project');
   const [selectedApprovalId, setSelectedApprovalId] = useState<string | null>(null);
   const [showNewJob, setShowNewJob] = useState(false);
   const [showNewProject, setShowNewProject] = useState(false);
@@ -104,6 +105,13 @@ export default function App() {
     setSelectedApprovalId(null);
   };
 
+  const handleSelectSettings = () => {
+    setSelectedView('settings');
+    setSelectedJobId(null);
+    setSelectedApprovalId(null);
+    setShowArchived(false);
+  };
+
   const handleNavigateToJob = (projectId: string, jobId: string) => {
     setSelectedView('project');
     setSelectedProjectId(projectId);
@@ -151,6 +159,7 @@ export default function App() {
         selectedJobId={selectedJobId}
         selectedApprovalId={selectedApprovalId}
         isApprovalView={selectedView === 'approvals'}
+        isSettingsView={selectedView === 'settings'}
         connected={store.connected}
         onSelectProject={handleSelectProject}
         onSelectJob={handleSelectJob}
@@ -158,6 +167,7 @@ export default function App() {
         onSelectApprovalView={handleSelectApprovalView}
         onNewProject={() => setShowNewProject(true)}
         onOpenSearch={() => setShowCommandPalette(true)}
+        onOpenSettings={handleSelectSettings}
         onImport={() => setShowImportModal(true)}
         onArchiveProject={handleArchiveProject}
         onUnarchiveProject={handleUnarchiveProject}
@@ -171,7 +181,18 @@ export default function App() {
       />
 
       <div className="main">
-        {selectedView === 'approvals' ? (
+        {selectedView === 'settings' ? (
+          <>
+            <div className="topbar">
+              <div className="flex items-center gap-3">
+                <Settings size={16} style={{ color: 'var(--accent)' }} />
+                <h2>Settings</h2>
+                <span className="text-sm text-muted">Runtime configuration for new Claude jobs and sessions</span>
+              </div>
+            </div>
+            <SettingsPage />
+          </>
+        ) : selectedView === 'approvals' ? (
           /* ── Approval view ── */
           <>
             <div className="topbar">
@@ -376,6 +397,7 @@ export default function App() {
           onClose={() => setShowCommandPalette(false)}
         />
       )}
+
     </div>
   );
 }

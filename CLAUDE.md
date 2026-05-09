@@ -250,6 +250,8 @@ Agent tool results come from the SDK as `[{"type":"text","text":"..."},{"type":"
 ## Service Restart
 After you finish your change(add feature, fix bug,...), restart the frontend to employ before you finish the task, For change on backend service, never restart the service until user tell you to do so since their maybe other job running.
 
+** Exeception and Required if you are developing at a worktree**: If you are working on a worktree, you should just restart both the frontend and backend for user to test and verify. the main branch service is default serve at http://localhost:5174. You should launch service for worktree use other port(ranging from 6100-6200, backend to 3100-3200) to avoid conflic.
+
 ## Code/Plan Review
 - **Plan review:** When you finish drafting a plan, invite Codex to review it before submitting to the user for approval.
 - **Implementation review:** After implementing a plan you created, always invite Codex to review your implementation before marking the task as complete.
