@@ -17,6 +17,10 @@ export type ThinkingConfig =
   | { type: 'disabled' }
   | { type: 'enabled'; budgetTokens: number; effort?: EffortLevel };
 
+export interface ContextConfig {
+  oneMillion?: boolean;
+}
+
 export type AttachmentMediaType = 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
 
 export interface Attachment {
@@ -33,11 +37,19 @@ export interface ModelOption {
   description: string;
 }
 
+export interface ModelShortcutSettings {
+  haiku: string;
+  sonnet: string;
+  opus: string;
+}
+
 export interface AppSettings {
   anthropicApiKeySet: boolean;
   anthropicApiKeyPreview?: string;
   anthropicBaseUrl: string;
   modelsText: string;
+  modelShortcuts: ModelShortcutSettings;
+  customModels: string[];
   models: ModelOption[];
 }
 
@@ -47,6 +59,7 @@ export interface Job {
   name?: string;
   prompt: string;
   model?: string;
+  modelDisplayName?: string;
   attachments?: Attachment[];
   status: JobStatus;
   sessionId?: string;
@@ -59,6 +72,7 @@ export interface Job {
   tokenUsage?: { input: number; output: number };
   mode?: 'job' | 'session';
   thinking?: ThinkingConfig;
+  context?: ContextConfig;
   idleDeadline?: string;   // ISO timestamp — when idle grace period expires (auto-complete)
   forkedFrom?: {
     jobId: string;
