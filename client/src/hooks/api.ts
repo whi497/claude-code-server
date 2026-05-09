@@ -10,6 +10,9 @@ async function request(path: string, opts?: RequestInit) {
 }
 
 export const api = {
+  getSettings: (): Promise<import('../types').AppSettings> => request('/settings'),
+  updateSettings: (settings: { anthropicApiKey?: string; clearAnthropicApiKey?: boolean; anthropicBaseUrl?: string; modelsText?: string }): Promise<import('../types').AppSettings> =>
+    request('/settings', { method: 'PUT', body: JSON.stringify(settings) }),
   getProjects: () => request('/projects'),
   createProject: (name: string, path?: string) => request('/projects', { method: 'POST', body: JSON.stringify({ name, path }) }),
   deleteProject: (id: string) => request(`/projects/${id}`, { method: 'DELETE' }),

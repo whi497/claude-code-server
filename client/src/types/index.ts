@@ -33,6 +33,14 @@ export interface ModelOption {
   description: string;
 }
 
+export interface AppSettings {
+  anthropicApiKeySet: boolean;
+  anthropicApiKeyPreview?: string;
+  anthropicBaseUrl: string;
+  modelsText: string;
+  models: ModelOption[];
+}
+
 export interface Job {
   id: string;
   projectId: string;
