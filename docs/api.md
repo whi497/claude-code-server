@@ -757,7 +757,7 @@ interface Attachment {
 ### ThinkingConfig
 
 ```typescript
-type EffortLevel = 'low' | 'medium' | 'high';
+type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 type ThinkingConfig =
   | { type: 'disabled' }

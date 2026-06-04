@@ -106,7 +106,7 @@ See **[docs/deployment.md](docs/deployment.md)** for production deployment, PM2,
 |---------|-------------|
 | **Session Mode** | Keep a Claude session alive indefinitely for ongoing work. Toggle between one-shot jobs and persistent sessions. |
 | **Fork & Edit** | Branch conversations from any assistant turn, or edit and resend any of your messages. |
-| **Extended Thinking** | Configure Claude's thinking budget and effort level (low/medium/high) per job. |
+| **Extended Thinking** | Configure Claude's thinking budget and effort level (low/medium/high/xhigh/max) per job. |
 | **Image Attachments** | Drag-and-drop, paste, or browse to attach images to your prompts. |
 | **Import Local Sessions** | Discover and import past Claude Code CLI sessions from `~/.claude/projects/`. |
 | **Command Palette** | `Cmd+K` to fuzzy-search across all jobs by name, prompt, or chat content. |
