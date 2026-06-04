@@ -11,7 +11,7 @@ export interface Project {
   sortOrder?: number;
 }
 
-export type EffortLevel = 'low' | 'medium' | 'high';
+export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 export type ThinkingConfig =
   | { type: 'disabled' }

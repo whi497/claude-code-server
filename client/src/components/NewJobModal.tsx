@@ -1,4 +1,4 @@
-import { useState, useRef, useMemo } from 'react';
+import { useState, useRef, useMemo, useCallback } from 'react';
 import { Paperclip, Cpu, MessageSquare } from 'lucide-react';
 import { api } from '../hooks/api';
 import { useSuggestions, type CommandDef, FALLBACK_SDK_COMMANDS } from '../hooks/useSuggestions';
@@ -6,7 +6,7 @@ import { useAttachments } from '../hooks/useAttachments';
 import { SuggestionDropdown } from './SuggestionDropdown';
 import { AttachmentPreview } from './AttachmentPreview';
 import { ContextToolbar, ThinkingToolbar, ModelPickerModal, getModelDisplayName } from './PromptControls';
-import type { Job, ThinkingConfig, ModelOption } from '../types';
+import type { Job, ThinkingConfig, ModelOption, EffortLevel } from '../types';
 
 interface Props {
   projectId: string;
@@ -15,16 +15,56 @@ interface Props {
 }
 
 const DEFAULT_THINKING_BUDGET = 10000;
+const NEW_JOB_PREFERENCES_KEY = 'claude-code-server:new-job-preferences';
+const EFFORT_LEVELS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+interface NewJobPreferences {
+  sessionMode?: boolean;
+  thinkingEnabled?: boolean;
+  thinkingBudget?: number;
+  thinkingEffort?: EffortLevel;
+  contextOneMillion?: boolean;
+  selectedModel?: string;
+  selectedModelDisplayName?: string;
+}
+
+function loadNewJobPreferences(): NewJobPreferences {
+  try {
+    const raw = localStorage.getItem(NEW_JOB_PREFERENCES_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return {
+      ...(typeof parsed.sessionMode === 'boolean' ? { sessionMode: parsed.sessionMode } : {}),
+      ...(typeof parsed.thinkingEnabled === 'boolean' ? { thinkingEnabled: parsed.thinkingEnabled } : {}),
+      ...(typeof parsed.thinkingBudget === 'number' && parsed.thinkingBudget > 0 ? { thinkingBudget: parsed.thinkingBudget } : {}),
+      ...(typeof parsed.thinkingEffort === 'string' && EFFORT_LEVELS.includes(parsed.thinkingEffort as EffortLevel) ? { thinkingEffort: parsed.thinkingEffort as EffortLevel } : {}),
+      ...(typeof parsed.contextOneMillion === 'boolean' ? { contextOneMillion: parsed.contextOneMillion } : {}),
+      ...(typeof parsed.selectedModel === 'string' ? { selectedModel: parsed.selectedModel } : {}),
+      ...(typeof parsed.selectedModelDisplayName === 'string' ? { selectedModelDisplayName: parsed.selectedModelDisplayName } : {}),
+    };
+  } catch {
+    return {};
+  }
+}
+
+function saveNewJobPreferences(prefs: NewJobPreferences) {
+  try {
+    localStorage.setItem(NEW_JOB_PREFERENCES_KEY, JSON.stringify(prefs));
+  } catch {
+    // Preferences are best-effort; blocked storage must not prevent job creation.
+  }
+}
 
 export function NewJobModal({ projectId, onClose, onCreated }: Props) {
+  const initialPreferences = useMemo(loadNewJobPreferences, []);
   const [prompt, setPrompt] = useState('');
-  const [sessionMode, setSessionMode] = useState(false);
-  const [thinkingEnabled, setThinkingEnabled] = useState(false);
-  const [thinkingBudget, setThinkingBudget] = useState(DEFAULT_THINKING_BUDGET);
-  const [thinkingEffort, setThinkingEffort] = useState<'low' | 'medium' | 'high'>('medium');
-  const [contextOneMillion, setContextOneMillion] = useState(false);
-  const [selectedModel, setSelectedModel] = useState('default');
-  const [selectedModelDisplayName, setSelectedModelDisplayName] = useState<string | undefined>();
+  const [sessionMode, setSessionMode] = useState(() => initialPreferences.sessionMode ?? false);
+  const [thinkingEnabled, setThinkingEnabled] = useState(() => initialPreferences.thinkingEnabled ?? false);
+  const [thinkingBudget, setThinkingBudget] = useState(() => initialPreferences.thinkingBudget ?? DEFAULT_THINKING_BUDGET);
+  const [thinkingEffort, setThinkingEffort] = useState<EffortLevel>(() => initialPreferences.thinkingEffort ?? 'medium');
+  const [contextOneMillion, setContextOneMillion] = useState(() => initialPreferences.contextOneMillion ?? false);
+  const [selectedModel, setSelectedModel] = useState(() => initialPreferences.selectedModel ?? 'default');
+  const [selectedModelDisplayName, setSelectedModelDisplayName] = useState<string | undefined>(() => initialPreferences.selectedModelDisplayName);
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([]);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [modelPickerLoading, setModelPickerLoading] = useState(false);
@@ -34,15 +74,32 @@ export function NewJobModal({ projectId, onClose, onCreated }: Props) {
 
   const attach = useAttachments();
 
+  const persistPreferences = useCallback((next: NewJobPreferences = {}) => {
+    saveNewJobPreferences({
+      sessionMode,
+      thinkingEnabled,
+      thinkingBudget,
+      thinkingEffort,
+      contextOneMillion,
+      selectedModel,
+      selectedModelDisplayName,
+      ...next,
+    });
+  }, [contextOneMillion, selectedModel, selectedModelDisplayName, sessionMode, thinkingBudget, thinkingEffort, thinkingEnabled]);
+
   const commands = useMemo<CommandDef[]>(() => [
     {
       id: 'session',
       label: '/session',
       description: 'Toggle persistent session mode',
       available: () => true,
-      execute: () => setSessionMode(prev => !prev),
+      execute: () => setSessionMode(prev => {
+        const next = !prev;
+        persistPreferences({ sessionMode: next });
+        return next;
+      }),
     },
-  ], []);
+  ], [persistPreferences]);
 
   const suggestions = useSuggestions({
     inputRef: textareaRef,
@@ -73,6 +130,7 @@ export function NewJobModal({ projectId, onClose, onCreated }: Props) {
       const thinking: ThinkingConfig | undefined = thinkingEnabled
         ? { type: 'enabled', budgetTokens: thinkingBudget, effort: thinkingEffort }
         : undefined;
+      persistPreferences();
       const job = await api.createJob(
         projectId,
         prompt.trim(),
@@ -145,7 +203,11 @@ export function NewJobModal({ projectId, onClose, onCreated }: Props) {
           <button
             type="button"
             className={`thinking-toolbar-toggle ${sessionMode ? 'active' : ''}`}
-            onClick={() => setSessionMode(prev => !prev)}
+            onClick={() => setSessionMode(prev => {
+              const next = !prev;
+              persistPreferences({ sessionMode: next });
+              return next;
+            })}
             title={sessionMode ? 'Start as persistent session' : 'Start as regular job'}
           >
             <MessageSquare size={13} />
@@ -155,13 +217,25 @@ export function NewJobModal({ projectId, onClose, onCreated }: Props) {
             enabled={thinkingEnabled}
             effort={thinkingEffort}
             budget={thinkingBudget}
-            onToggle={setThinkingEnabled}
-            onEffortChange={setThinkingEffort}
-            onBudgetChange={setThinkingBudget}
+            onToggle={(enabled) => {
+              setThinkingEnabled(enabled);
+              persistPreferences({ thinkingEnabled: enabled });
+            }}
+            onEffortChange={(effort) => {
+              setThinkingEffort(effort);
+              persistPreferences({ thinkingEffort: effort });
+            }}
+            onBudgetChange={(budget) => {
+              setThinkingBudget(budget);
+              persistPreferences({ thinkingBudget: budget });
+            }}
           />
           <ContextToolbar
             oneMillion={contextOneMillion}
-            onToggle={setContextOneMillion}
+            onToggle={(enabled) => {
+              setContextOneMillion(enabled);
+              persistPreferences({ contextOneMillion: enabled });
+            }}
           />
           <button
             type="button"
@@ -218,6 +292,7 @@ export function NewJobModal({ projectId, onClose, onCreated }: Props) {
         onSelect={(model) => {
           setSelectedModel(model.value);
           setSelectedModelDisplayName(model.displayName);
+          persistPreferences({ selectedModel: model.value, selectedModelDisplayName: model.displayName });
           setModelPickerOpen(false);
         }}
       />

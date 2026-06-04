@@ -6,6 +6,8 @@ const EFFORT_LEVELS: { value: EffortLevel; label: string }[] = [
   { value: 'low', label: 'Lo' },
   { value: 'medium', label: 'Med' },
   { value: 'high', label: 'Hi' },
+  { value: 'xhigh', label: 'XHi' },
+  { value: 'max', label: 'Max' },
 ];
 
 const BUDGET_PRESETS = [

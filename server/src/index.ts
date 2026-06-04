@@ -10,7 +10,7 @@ import { promisify } from 'util';
 import * as pty from 'node-pty';
 import { query, forkSession, getSessionMessages } from '@anthropic-ai/claude-agent-sdk';
 import { createRequire } from 'module';
-import type { Job, Project, LogEntry, JobStatus, ApprovalRequest, ApprovalResponse, ApprovalType, ApprovalStatus, ImportProgress, ImportResult, LocalProject, Attachment, AttachmentMediaType, AppSettings, ModelOption, ModelShortcutSettings, RequestLogEntry } from './types.js';
+import type { Job, Project, LogEntry, JobStatus, ApprovalRequest, ApprovalResponse, ApprovalType, ApprovalStatus, ImportProgress, ImportResult, LocalProject, Attachment, AttachmentMediaType, AppSettings, ModelOption, ModelShortcutSettings, RequestLogEntry, EffortLevel } from './types.js';
 import { discoverLocalProjects, parseClaudeSession } from './claude-importer.js';
 
 // Resolve the SDK's built-in CLI path at startup (before cwd changes).
@@ -93,6 +93,8 @@ const MODEL_SHORTCUT_META: Record<ModelShortcutKey, { displayName: string; fallb
   },
 };
 const ONE_MILLION_CONTEXT_BETA = 'context-1m-2025-08-07' as const;
+const EFFORT_LEVELS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+const EFFORT_LEVEL_SET = new Set<string>(EFFORT_LEVELS);
 
 function parseEnvValue(raw: string): string {
   const trimmed = raw.trim();
@@ -716,6 +718,12 @@ function buildUserContent(text: string, attachments?: Attachment[] | null): stri
     })),
     { type: 'text' as const, text },
   ];
+}
+
+function normalizeEffortLevel(effort: unknown): EffortLevel | undefined {
+  return typeof effort === 'string' && EFFORT_LEVEL_SET.has(effort)
+    ? effort as EffortLevel
+    : undefined;
 }
 
 function stripAnsi(value: string): string {
@@ -1408,7 +1416,7 @@ app.post('/api/jobs', (req, res) => {
   // Validate and normalize thinking config
   let thinkingConfig: Job['thinking'] | undefined;
   if (thinking && thinking.type === 'enabled' && typeof thinking.budgetTokens === 'number' && thinking.budgetTokens > 0) {
-    const effort = ['low', 'medium', 'high'].includes(thinking.effort) ? thinking.effort : undefined;
+    const effort = normalizeEffortLevel(thinking.effort);
     thinkingConfig = { type: 'enabled', budgetTokens: thinking.budgetTokens, ...(effort ? { effort } : {}) };
   }
 
@@ -1453,7 +1461,7 @@ app.put('/api/jobs/:id/thinking', (req, res) => {
 
   const { thinking } = req.body;
   if (thinking && thinking.type === 'enabled' && typeof thinking.budgetTokens === 'number' && thinking.budgetTokens > 0) {
-    const effort = ['low', 'medium', 'high'].includes(thinking.effort) ? thinking.effort : undefined;
+    const effort = normalizeEffortLevel(thinking.effort);
     job.thinking = { type: 'enabled', budgetTokens: thinking.budgetTokens, ...(effort ? { effort } : {}) };
   } else {
     job.thinking = undefined;
@@ -1489,7 +1497,7 @@ app.post('/api/jobs/:id/continue', async (req, res) => {
   // Update thinking config if provided with the continue request
   if (thinking !== undefined) {
     if (thinking && thinking.type === 'enabled' && typeof thinking.budgetTokens === 'number' && thinking.budgetTokens > 0) {
-      const effort = ['low', 'medium', 'high'].includes(thinking.effort) ? thinking.effort : undefined;
+      const effort = normalizeEffortLevel(thinking.effort);
       job.thinking = { type: 'enabled', budgetTokens: thinking.budgetTokens, ...(effort ? { effort } : {}) };
     } else {
       job.thinking = undefined;
