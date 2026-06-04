@@ -10,7 +10,7 @@ import { promisify } from 'util';
 import * as pty from 'node-pty';
 import { query, forkSession, getSessionMessages } from '@anthropic-ai/claude-agent-sdk';
 import { createRequire } from 'module';
-import type { Job, Project, LogEntry, JobStatus, ApprovalRequest, ApprovalResponse, ApprovalType, ApprovalStatus, ImportProgress, ImportResult, LocalProject, Attachment, AttachmentMediaType, AppSettings, ModelOption, ModelShortcutSettings } from './types.js';
+import type { Job, Project, LogEntry, JobStatus, ApprovalRequest, ApprovalResponse, ApprovalType, ApprovalStatus, ImportProgress, ImportResult, LocalProject, Attachment, AttachmentMediaType, AppSettings, ModelOption, ModelShortcutSettings, RequestLogEntry } from './types.js';
 import { discoverLocalProjects, parseClaudeSession } from './claude-importer.js';
 
 // Resolve the SDK's built-in CLI path at startup (before cwd changes).
@@ -43,6 +43,7 @@ function resolveClaudeCodeExecutable(): string | undefined {
 }
 
 const CLAUDE_CODE_EXECUTABLE = resolveClaudeCodeExecutable();
+const REQUEST_LOG_LIMIT = 100;
 
 // ── Async fs alias ─────────────────────────────────────────────
 const fsp = fs.promises;
@@ -298,6 +299,44 @@ const QUESTION_DISCARD_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
 const idleTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const IDLE_GRACE_MS = 5 * 60 * 1000; // 5 minutes
 
+function sanitizeRequestPayload(value: unknown): unknown {
+  if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return value;
+  if (typeof value === 'undefined') return '[undefined]';
+  if (typeof value === 'function') return '[function]';
+  if (value instanceof AbortController) return '[AbortController]';
+  if (value instanceof AbortSignal) return '[AbortSignal]';
+  if (Array.isArray(value)) return value.map(sanitizeRequestPayload);
+  if (typeof value !== 'object') return `[${typeof value}]`;
+
+  const input = value as Record<string, unknown>;
+  const output: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(input)) {
+    if (key === 'data' && typeof item === 'string') {
+      output[key] = `[base64:${item.length} chars]`;
+    } else if (key === 'source' && item && typeof item === 'object' && (item as Record<string, unknown>).type === 'base64') {
+      const source = item as Record<string, unknown>;
+      output[key] = {
+        ...source,
+        data: typeof source.data === 'string' ? `[base64:${source.data.length} chars]` : sanitizeRequestPayload(source.data),
+      };
+    } else {
+      output[key] = sanitizeRequestPayload(item);
+    }
+  }
+  return output;
+}
+
+function appendRequestLog(job: Job, entry: Omit<RequestLogEntry, 'id' | 'timestamp'>) {
+  const requestLog: RequestLogEntry = {
+    ...entry,
+    id: uuid(),
+    timestamp: new Date().toISOString(),
+  };
+  job.requestLogs = [...(job.requestLogs ?? []), requestLog].slice(-REQUEST_LOG_LIMIT);
+  broadcast('job:request-log', { jobId: job.id, log: requestLog });
+  return requestLog;
+}
+
 function clearIdleTimer(jobId: string) {
   const timer = idleTimers.get(jobId);
   if (timer) {
@@ -334,7 +373,7 @@ function saveState() {
   }
   _saveInFlight = true;
   const tmpFile = STATE_FILE + '.tmp';
-  const data = JSON.stringify({ projects, jobs: jobs.map(j => ({ ...j, logs: j.logs.slice(-200), attachments: stripAttachmentData(j.attachments) })) }, null, 2);
+  const data = JSON.stringify({ projects, jobs: jobs.map(j => ({ ...j, logs: j.logs.slice(-200), requestLogs: j.requestLogs?.slice(-REQUEST_LOG_LIMIT), attachments: stripAttachmentData(j.attachments) })) }, null, 2);
   fsp.mkdir(PROJECTS_ROOT, { recursive: true })
     .then(() => fsp.writeFile(tmpFile, data))
     .then(() => fsp.rename(tmpFile, STATE_FILE))
@@ -867,13 +906,27 @@ async function runJob(job: Job, runOptions: RunJobOptions = {}) {
       addLog({ type: 'user', content: job.prompt, ...(job.attachments?.length ? { meta: { attachments: job.attachments.map(a => ({ filename: a.filename, mediaType: a.mediaType, size: a.size })) } } : {}) });
 
       // Push the first user message into the generator (with image content blocks if attachments present)
-      channel.push({
+      const userMessage = {
         type: 'user' as const,
         message: { role: 'user' as const, content: buildUserContent(job.prompt, job.attachments) } as any,
+      };
+      appendRequestLog(job, {
+        kind: 'message',
+        label: 'Initial user message',
+        payload: sanitizeRequestPayload(userMessage),
       });
+      channel.push(userMessage);
     }
 
     // Process messages — loop stays alive until generator is closed or aborted
+    appendRequestLog(job, {
+      kind: 'query',
+      label: activateOnly ? 'SDK query activation' : 'SDK query',
+      payload: sanitizeRequestPayload({
+        prompt: '[AsyncGenerator<Message>]',
+        options: opts,
+      }),
+    });
     const queryHandle = query({ prompt: channel.generator, options: opts });
     session.queryHandle = queryHandle;
     if (activateOnly && queryHandle.initializationResult) {
@@ -1321,8 +1374,8 @@ app.delete('/api/projects/:id', (req, res) => {
 app.get('/api/jobs', (req, res) => {
   const { projectId } = req.query;
   const filtered = projectId ? jobs.filter(j => j.projectId === projectId) : jobs;
-  // Return jobs without full logs for list view
-  res.json(filtered.map(j => ({ ...j, logs: [] })));
+  // Return jobs without full logs/debug payloads for list view
+  res.json(filtered.map(j => ({ ...j, logs: [], requestLogs: [] })));
 });
 
 app.get('/api/jobs/:id', (req, res) => {
@@ -1561,10 +1614,16 @@ app.post('/api/jobs/:id/continue', async (req, res) => {
       broadcast('job:log', { jobId: job.id, log });
 
       // Push to the live async generator (with image content blocks if attachments present)
-      session.channel.push({
+      const userMessage = {
         type: 'user' as const,
         message: { role: 'user' as const, content: buildUserContent(message, continueAttachments) } as any,
+      };
+      appendRequestLog(job, {
+        kind: 'message',
+        label: 'Live user message',
+        payload: sanitizeRequestPayload(userMessage),
       });
+      session.channel.push(userMessage);
 
       job.status = 'running';
       job.updatedAt = new Date().toISOString();
@@ -1590,10 +1649,16 @@ app.post('/api/jobs/:id/continue', async (req, res) => {
       broadcast('job:log', { jobId: job.id, log });
 
       // Queue into the async generator — SDK processes it after current turn
-      session.channel.push({
+      const userMessage = {
         type: 'user' as const,
         message: { role: 'user' as const, content: buildUserContent(message, continueAttachments) } as any,
+      };
+      appendRequestLog(job, {
+        kind: 'message',
+        label: 'Queued user message',
+        payload: sanitizeRequestPayload(userMessage),
       });
+      session.channel.push(userMessage);
 
       job.updatedAt = new Date().toISOString();
       job.lastInteractionAt = new Date().toISOString();

@@ -95,6 +95,7 @@ See **[docs/deployment.md](docs/deployment.md)** for production deployment, PM2,
 |-------|-------------|
 | **Chat View** | Rich chat interface with per-tool rendering, syntax-highlighted diffs, thinking blocks, and subagent nesting. |
 | **Terminal** | Embedded xterm.js terminal connected to your project directory via WebSocket PTY. |
+| **Log** | Inspect sanitized Claude Agent SDK `query` options and generator messages sent for a job. |
 | **File Browser** | Browse project files with fuzzy search across names and content. |
 | **Git Panel** | View diffs, stage/unstage files, commit, push, and pull — with "touched by this job" indicators. |
 | **Memories** | View and edit Claude's memory files (CLAUDE.md hierarchy) directly. |

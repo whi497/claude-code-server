@@ -79,6 +79,7 @@ export interface Job {
     turnIndex: number;      // which assistant turn was forked after (0-based)
   };
   logs: LogEntry[];
+  requestLogs?: RequestLogEntry[];
 }
 
 export type LogType = 'text' | 'tool' | 'tool_result' | 'thinking' | 'system' | 'error' | 'result' | 'user';
@@ -99,6 +100,16 @@ export interface LogEntry {
     subagent_usage?: { input_tokens?: number; output_tokens?: number };
     [key: string]: unknown;
   };
+}
+
+export type RequestLogKind = 'query' | 'message';
+
+export interface RequestLogEntry {
+  id: string;
+  timestamp: string;
+  kind: RequestLogKind;
+  label: string;
+  payload: unknown;
 }
 
 // ── Approval types ──────────────────────────────────────────────

@@ -6,8 +6,8 @@ import { SuggestionDropdown } from './SuggestionDropdown';
 import { AttachmentPreview } from './AttachmentPreview';
 import { AttachmentBadge } from './AttachmentPreview';
 import { ContextToolbar, ThinkingToolbar, ModelPickerModal, getModelDisplayName } from './PromptControls';
-import type { Job, LogEntry, ThinkingConfig, EffortLevel, ModelOption } from '../types';
-import { Square, Archive, Play, FolderTree, ScrollText, MessageSquare, ChevronDown, ChevronRight, Wrench, Terminal, FileText, Search, Edit3, PenTool, Globe, Bot, FileCode, Copy, BookOpen, Clock, Save, X, Folder, FolderOpen, File, RefreshCw, GitBranch, Plus, Upload, Download, Check, Undo2, Star, Maximize2, ListPlus, Brain, Paperclip, Cpu, AlertTriangle } from 'lucide-react';
+import type { Job, LogEntry, ThinkingConfig, EffortLevel, ModelOption, RequestLogEntry } from '../types';
+import { Square, Archive, Play, FolderTree, ScrollText, MessageSquare, ChevronDown, ChevronRight, Wrench, Terminal, FileText, Search, Edit3, PenTool, Globe, Bot, FileCode, Copy, BookOpen, Clock, Save, X, Folder, FolderOpen, File, RefreshCw, GitBranch, Plus, Upload, Download, Check, Undo2, Star, Maximize2, ListPlus, Brain, Paperclip, Cpu, AlertTriangle, ClipboardList } from 'lucide-react';
 import { renderInline, isTableRow, isTableSeparator, renderTable, renderMarkdown } from './Markdown';
 import { TerminalPane } from './TerminalPane';
 
@@ -1035,6 +1035,26 @@ function OutputLogLine({ log }: { log: LogEntry }) {
   );
 }
 
+function RequestLogCard({ log }: { log: RequestLogEntry }) {
+  const [expanded, setExpanded] = useState(log.kind === 'query');
+  const prettyPayload = useMemo(() => JSON.stringify(log.payload, null, 2), [log.payload]);
+  const payloadPreview = prettyPayload.length > 180 ? `${prettyPayload.slice(0, 180)}...` : prettyPayload;
+
+  return (
+    <div className="request-log-card">
+      <button className="request-log-header" onClick={() => setExpanded(!expanded)}>
+        {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+        <span className={`request-log-kind request-log-kind-${log.kind}`}>{log.kind}</span>
+        <span className="request-log-label">{log.label}</span>
+        <span className="request-log-time">{formatTime(log.timestamp)}</span>
+      </button>
+      <pre className={`request-log-payload ${expanded ? '' : 'request-log-payload-collapsed'}`}>
+        {expanded ? prettyPayload : payloadPreview}
+      </pre>
+    </div>
+  );
+}
+
 // ── Collapsible multi-file memory section ──────────────────────
 function MemoryFilesSection({ section, badgeClass }: { section: any; badgeClass: string }) {
   const [expandedFile, setExpandedFile] = useState<string | null>(null);
@@ -1216,8 +1236,9 @@ function CollapsibleUserText({ text }: { text: string }) {
 
 // ── Main component ─────────────────────────────────────────────
 export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs, theme = 'dark' }: Props) {
-  const [tab, setTab] = useState<'chat' | 'terminal' | 'output' | 'files' | 'git' | 'memories' | 'cron'>('chat');
+  const [tab, setTab] = useState<'chat' | 'terminal' | 'output' | 'log' | 'files' | 'git' | 'memories' | 'cron'>('chat');
   const [fullLogs, setFullLogs] = useState<LogEntry[]>([]);
+  const [fullRequestLogs, setFullRequestLogs] = useState<RequestLogEntry[]>([]);
   const [files, setFiles] = useState<any[]>([]);
   const [fileContent, setFileContent] = useState<{ path: string; content: string } | null>(null);
   const [fileSearchQuery, setFileSearchQuery] = useState('');
@@ -1395,7 +1416,11 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
 
   useEffect(() => {
     setFullLogs([]);
-    api.getJob(job.id).then(j => setFullLogs(j.logs ?? [])).catch(() => {});
+    setFullRequestLogs([]);
+    api.getJob(job.id).then(j => {
+      setFullLogs(j.logs ?? []);
+      setFullRequestLogs(j.requestLogs ?? []);
+    }).catch(() => {});
   }, [job.id]);
 
   // Idle grace period countdown timer
@@ -1436,6 +1461,18 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
     () => groupLogsIntoChatMessages(allLogs, job.status === 'running'),
     [allLogs, job.status],
   );
+
+  const requestLogs = useMemo(() => {
+    const seen = new Set<string>();
+    const result: RequestLogEntry[] = [];
+    for (const log of [...fullRequestLogs, ...(job.requestLogs ?? [])]) {
+      if (!seen.has(log.id)) {
+        seen.add(log.id);
+        result.push(log);
+      }
+    }
+    return result;
+  }, [fullRequestLogs, job.requestLogs]);
 
   // Extract files touched by this job from its tool call logs
   const jobTouchedFiles = useMemo(() => {
@@ -1804,6 +1841,9 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
         <div className={`tab ${tab === 'output' ? 'active' : ''}`} onClick={() => setTab('output')}>
           <span className="flex items-center gap-2"><ScrollText size={12} /> Output</span>
         </div>
+        <div className={`tab ${tab === 'log' ? 'active' : ''}`} onClick={() => setTab('log')}>
+          <span className="flex items-center gap-2"><ClipboardList size={12} /> Log</span>
+        </div>
         <div className={`tab ${tab === 'files' ? 'active' : ''}`} onClick={() => setTab('files')}>
           <span className="flex items-center gap-2"><FolderTree size={12} /> Files</span>
         </div>
@@ -2112,6 +2152,28 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
                 </div>
               </div>
             )}
+          </div>
+        )}
+
+        {/* ── Log tab (SDK request debug data) ── */}
+        {tab === 'log' && (
+          <div className="request-log-tab">
+            <div className="request-log-toolbar">
+              <div>
+                <div className="request-log-title">SDK Requests</div>
+                <div className="request-log-subtitle">Actual `query` options and generator messages sent by this job.</div>
+              </div>
+              <span className="request-log-count">{requestLogs.length} entries</span>
+            </div>
+            <div className="request-log-list">
+              {requestLogs.length === 0 ? (
+                <div className="request-log-empty">
+                  No request logs captured for this job yet.
+                </div>
+              ) : (
+                requestLogs.map(log => <RequestLogCard key={log.id} log={log} />)
+              )}
+            </div>
           </div>
         )}
 

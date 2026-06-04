@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback, useState, useMemo } from 'react';
-import type { Project, Job, LogEntry, ApprovalRequest, ImportProgress, ImportResult } from '../types';
+import type { Project, Job, LogEntry, ApprovalRequest, ImportProgress, ImportResult, RequestLogEntry } from '../types';
 
 type WSEvent =
   | { event: 'init'; data: { projects: Project[]; jobs: Job[]; approvals?: ApprovalRequest[] } }
@@ -8,6 +8,7 @@ type WSEvent =
   | { event: 'job:created'; data: Job }
   | { event: 'job:updated'; data: Job }
   | { event: 'job:log'; data: { jobId: string; log: LogEntry } }
+  | { event: 'job:request-log'; data: { jobId: string; log: RequestLogEntry } }
   | { event: 'approval:created'; data: ApprovalRequest }
   | { event: 'approval:updated'; data: ApprovalRequest }
   | { event: 'projects:reordered'; data: { projects: Project[] } }
@@ -82,6 +83,13 @@ export function useStore() {
             const { jobId, log } = msg.data;
             const existing = s.jobLogs[jobId] ?? [];
             return { ...s, jobLogs: { ...s.jobLogs, [jobId]: [...existing, log] } };
+          }
+          case 'job:request-log': {
+            const { jobId, log } = msg.data;
+            return {
+              ...s,
+              jobs: s.jobs.map(j => j.id === jobId ? { ...j, requestLogs: [...(j.requestLogs ?? []), log] } : j),
+            };
           }
           case 'approval:created': {
             if (s.approvals.some(a => a.id === msg.data.id)) return s;
