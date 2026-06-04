@@ -7,7 +7,7 @@ export interface SuggestionItem {
   id: string;
   label: string;
   description?: string;
-  icon: 'file' | 'folder' | 'command' | 'sdk-command';
+  icon: 'file' | 'folder' | 'command' | 'sdk-command' | 'goal' | 'loop';
   type: 'file' | 'command' | 'sdk-command';
 }
 
@@ -24,6 +24,7 @@ export interface SDKSlashCommand {
   name: string;          // e.g. "compact" (without leading /)
   description: string;
   argumentHint: string;  // e.g. "<instructions>"
+  aliases?: string[];
 }
 
 /**
@@ -37,6 +38,8 @@ export interface SDKSlashCommand {
  * Server-handled commands (model, help) are injected separately.
  */
 export const FALLBACK_SDK_COMMANDS: SDKSlashCommand[] = [
+  { name: 'goal', description: 'Set or update the active goal for this session', argumentHint: '<objective>' },
+  { name: 'loop', description: 'Run repeated agent turns toward the current goal', argumentHint: '<instructions>' },
   { name: 'compact', description: 'Compact conversation to reduce context', argumentHint: '<instructions>' },
   { name: 'review', description: 'Review a pull request', argumentHint: '<pr-url>' },
   { name: 'init', description: 'Initialize project with CLAUDE.md', argumentHint: '' },
@@ -204,8 +207,12 @@ export function useSuggestions(options: UseSuggestionsOptions): UseSuggestionsRe
       .map(c => ({
         id: `sdk:${c.name}`,
         label: `/${c.name}`,
-        description: c.description + (c.argumentHint ? ` ${c.argumentHint}` : ''),
-        icon: 'sdk-command' as const,
+        description: [
+          c.description,
+          c.argumentHint,
+          c.aliases?.length ? `aliases: ${c.aliases.map(alias => `/${alias}`).join(', ')}` : '',
+        ].filter(Boolean).join(' '),
+        icon: c.name === 'goal' ? 'goal' as const : c.name === 'loop' ? 'loop' as const : 'sdk-command' as const,
         type: 'sdk-command' as const,
       }));
 

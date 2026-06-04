@@ -68,6 +68,7 @@ const CUSTOM_MODELS_ENV = 'CLAUDE_CODE_SERVER_MODELS';
 const MODEL_SHORTCUT_KEYS = ['haiku', 'sonnet', 'opus'] as const;
 type ModelShortcutKey = typeof MODEL_SHORTCUT_KEYS[number];
 type ModelSettingsInput = Partial<Record<ModelShortcutKey, unknown>>;
+type CachedSlashCommand = { name: string; description: string; argumentHint: string; aliases?: string[] };
 
 const EMPTY_MODEL_SHORTCUTS: ModelShortcutSettings = {
   haiku: '',
@@ -95,6 +96,40 @@ const MODEL_SHORTCUT_META: Record<ModelShortcutKey, { displayName: string; fallb
 const ONE_MILLION_CONTEXT_BETA = 'context-1m-2025-08-07' as const;
 const EFFORT_LEVELS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max'];
 const EFFORT_LEVEL_SET = new Set<string>(EFFORT_LEVELS);
+const SDK_COMMAND_METADATA: Record<string, Pick<CachedSlashCommand, 'description' | 'argumentHint'>> = {
+  goal: {
+    description: 'Set or update the active goal for this session',
+    argumentHint: '<objective>',
+  },
+  loop: {
+    description: 'Run repeated agent turns toward the current goal',
+    argumentHint: '<instructions>',
+  },
+};
+
+function normalizeSlashCommands(commands: unknown): CachedSlashCommand[] {
+  if (!Array.isArray(commands)) return [];
+  return commands
+    .map((command) => {
+      if (typeof command === 'string') {
+        const name = command.replace(/^\//, '');
+        const metadata = SDK_COMMAND_METADATA[name];
+        return { name, description: metadata?.description ?? '', argumentHint: metadata?.argumentHint ?? '' };
+      }
+      if (!command || typeof command !== 'object') return null;
+      const raw = command as Record<string, unknown>;
+      const name = typeof raw.name === 'string' ? raw.name.replace(/^\//, '') : '';
+      if (!name) return null;
+      const metadata = SDK_COMMAND_METADATA[name];
+      return {
+        name,
+        description: typeof raw.description === 'string' && raw.description ? raw.description : metadata?.description ?? '',
+        argumentHint: typeof raw.argumentHint === 'string' && raw.argumentHint ? raw.argumentHint : metadata?.argumentHint ?? '',
+        ...(Array.isArray(raw.aliases) ? { aliases: raw.aliases.filter((alias): alias is string => typeof alias === 'string') } : {}),
+      };
+    })
+    .filter((command): command is CachedSlashCommand => Boolean(command));
+}
 
 function parseEnvValue(raw: string): string {
   const trimmed = raw.trim();
@@ -283,7 +318,7 @@ const activeQueries = new Map<string, {
   abort: AbortController;
   channel?: { push: (msg: any) => void; close: () => void };
   queryHandle?: any;  // Query object for supportedCommands() etc.
-  cachedCommands?: { name: string; description: string; argumentHint: string }[];
+  cachedCommands?: CachedSlashCommand[];
 }>();
 
 // ── Approval state (ephemeral — not persisted) ──────────────────
@@ -961,17 +996,17 @@ async function runJob(job: Job, runOptions: RunJobOptions = {}) {
         // Proactively fetch full command list from SDK and cache it
         if (session.queryHandle?.supportedCommands) {
           session.queryHandle.supportedCommands()
-            .then((cmds: any[]) => { session.cachedCommands = cmds; })
+            .then((cmds: any[]) => { session.cachedCommands = normalizeSlashCommands(cmds); })
             .catch(() => {});
         }
         // Also use init message's slash_commands as immediate fallback
         if (msg.slash_commands && Array.isArray(msg.slash_commands) && !session.cachedCommands) {
-          session.cachedCommands = msg.slash_commands.map((name: string) => ({
-            name,
-            description: '',
-            argumentHint: '',
-          }));
+          session.cachedCommands = normalizeSlashCommands(msg.slash_commands);
         }
+      }
+
+      if (msg.type === 'system' && msg.subtype === 'commands_changed') {
+        session.cachedCommands = normalizeSlashCommands(msg.commands);
       }
 
       // Session state changes (forward-compat with future SDK versions)
@@ -1591,6 +1626,8 @@ app.post('/api/jobs/:id/continue', async (req, res) => {
       if (cmdName === 'help') {
         addCmdLog({ type: 'system', content: [
           'Available commands:',
+          '  /goal <objective> — Set or update the active goal',
+          '  /loop [instructions] — Run repeated turns toward the current goal',
           '  /compact [instructions] — Compact conversation to reduce context',
           '  /context — Show context window usage',
           '  /cost — Show token usage and costs',
@@ -2071,7 +2108,7 @@ app.get('/api/jobs/:id/commands', async (req, res) => {
   // Try live SDK call first (has full descriptions)
   if (session.queryHandle?.supportedCommands) {
     try {
-      const cmds = await session.queryHandle.supportedCommands();
+      const cmds = normalizeSlashCommands(await session.queryHandle.supportedCommands());
       session.cachedCommands = cmds; // update cache
       return res.json(cmds);
     } catch {

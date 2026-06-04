@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { File, Folder, Slash, Terminal } from 'lucide-react';
+import { File, Folder, Goal, Repeat2, Slash, Terminal } from 'lucide-react';
 import type { SuggestionItem } from '../hooks/useSuggestions';
 
 interface Props {
@@ -22,6 +22,10 @@ function ItemIcon({ icon }: { icon: SuggestionItem['icon'] }) {
       return <Slash size={13} />;
     case 'sdk-command':
       return <Terminal size={13} />;
+    case 'goal':
+      return <Goal size={13} />;
+    case 'loop':
+      return <Repeat2 size={13} />;
     default:
       return null;
   }

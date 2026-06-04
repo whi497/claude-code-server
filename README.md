@@ -111,7 +111,7 @@ See **[docs/deployment.md](docs/deployment.md)** for production deployment, PM2,
 | **Image Attachments** | Drag-and-drop, paste, or browse to attach images to your prompts. |
 | **Import Local Sessions** | Discover and import past Claude Code CLI sessions from `~/.claude/projects/`. |
 | **Command Palette** | `Cmd+K` to fuzzy-search across all jobs by name, prompt, or chat content. |
-| **Slash Commands** | Type `/` for Claude Code commands (`/compact`, `/model`, `/memory`, etc.) or `@` for file path autocomplete. |
+| **Slash Commands** | Type `/` for Claude Code commands (`/goal`, `/loop`, `/compact`, `/model`, etc.) or `@` for file path autocomplete. |
 | **Project Archiving** | Archive projects and jobs to keep your workspace tidy. |
 
 See **[docs/usage.md](docs/usage.md)** for a detailed walkthrough of every feature.
