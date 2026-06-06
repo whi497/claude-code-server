@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Cpu, KeyRound, Plus, Save, Server, Settings, Trash2, X } from 'lucide-react';
+import { Cpu, Gauge, KeyRound, Plus, Save, Server, Settings, Trash2, X } from 'lucide-react';
 import { api } from '../hooks/api';
 import type { AppSettings, ModelShortcutSettings } from '../types';
 
@@ -15,8 +15,8 @@ const MODEL_SHORTCUT_FIELDS: Array<{
   placeholder: string;
 }> = [
   { key: 'haiku', label: 'Haiku', placeholder: 'claude-3-5-haiku-20241022' },
-  { key: 'sonnet', label: 'Sonnet', placeholder: 'claude-sonnet-4-20250514' },
-  { key: 'opus', label: 'Opus', placeholder: 'claude-opus-4-1-20250805' },
+  { key: 'sonnet', label: 'Sonnet', placeholder: 'claude-sonnet-4-6' },
+  { key: 'opus', label: 'Opus', placeholder: 'claude-opus-4-6' },
 ];
 
 export function SettingsPage() {
@@ -25,6 +25,8 @@ export function SettingsPage() {
   const [baseUrl, setBaseUrl] = useState('');
   const [modelShortcuts, setModelShortcuts] = useState<ModelShortcutSettings>(EMPTY_MODEL_SHORTCUTS);
   const [customModels, setCustomModels] = useState<string[]>([]);
+  const [autoCompactEnabled, setAutoCompactEnabled] = useState(true);
+  const [autoCompactWindow, setAutoCompactWindow] = useState('');
   const [clearApiKey, setClearApiKey] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -41,6 +43,8 @@ export function SettingsPage() {
         setBaseUrl(data.anthropicBaseUrl);
         setModelShortcuts(data.modelShortcuts ?? EMPTY_MODEL_SHORTCUTS);
         setCustomModels(data.customModels ?? []);
+        setAutoCompactEnabled(data.claudeCode?.autoCompactEnabled ?? true);
+        setAutoCompactWindow(data.claudeCode?.autoCompactWindow ? String(data.claudeCode.autoCompactWindow) : '');
       })
       .catch((err: any) => {
         if (!cancelled) setError(err.message);
@@ -62,11 +66,17 @@ export function SettingsPage() {
         anthropicBaseUrl: baseUrl,
         modelShortcuts,
         customModels,
+        claudeCode: {
+          autoCompactEnabled,
+          autoCompactWindow: autoCompactWindow.trim() ? Number(autoCompactWindow.trim()) : null,
+        },
       });
       setSettings(next);
       setBaseUrl(next.anthropicBaseUrl);
       setModelShortcuts(next.modelShortcuts ?? EMPTY_MODEL_SHORTCUTS);
       setCustomModels(next.customModels ?? []);
+      setAutoCompactEnabled(next.claudeCode?.autoCompactEnabled ?? autoCompactEnabled);
+      setAutoCompactWindow(next.claudeCode?.autoCompactWindow ? String(next.claudeCode.autoCompactWindow) : autoCompactWindow);
       setApiKey('');
       setClearApiKey(false);
       setSaved(true);
@@ -122,7 +132,7 @@ export function SettingsPage() {
               <Settings size={18} />
               <h3>General</h3>
             </div>
-            <p>These settings are persisted to the worktree `.env` file and apply to new Claude Code runs.</p>
+            <p>These settings apply to new Claude Code runs. Credentials and models are stored in `.env`; Claude Code runtime settings are stored in global settings.</p>
           </div>
           <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
             <Save size={14} />
@@ -242,6 +252,40 @@ export function SettingsPage() {
                 ))}
               </div>
             )}
+          </div>
+        </div>
+
+        <div className="settings-section">
+          <div className="settings-section-heading">
+            <Gauge size={15} />
+            <div>
+              <h4>Claude Code Runtime</h4>
+              <p>Global settings from {settings.claudeCode?.settingsPath ?? '~/.claude/settings.json'}</p>
+            </div>
+          </div>
+
+          <div className="settings-form">
+            <label className="settings-check">
+              <input
+                type="checkbox"
+                checked={autoCompactEnabled}
+                onChange={e => setAutoCompactEnabled(e.target.checked)}
+              />
+              Enable auto-compact
+            </label>
+
+            <label className="settings-field">
+              <span className="settings-label">Auto-compact window</span>
+              <input
+                className="input"
+                type="number"
+                min="1"
+                step="1"
+                value={autoCompactWindow}
+                placeholder="Claude Code default"
+                onChange={e => setAutoCompactWindow(e.target.value)}
+              />
+            </label>
           </div>
         </div>
 

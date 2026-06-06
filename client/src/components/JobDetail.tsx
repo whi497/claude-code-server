@@ -28,20 +28,87 @@ function formatTime(iso: string) {
 const DEFAULT_CONTEXT_WINDOW_TOKENS = 200_000;
 const ONE_MILLION_CONTEXT_WINDOW_TOKENS = 1_000_000;
 
-function buildContextUsage(job: Job) {
-  if (!job.tokenUsage) return null;
-  const used = job.tokenUsage.input + job.tokenUsage.output;
-  const limit = job.context?.oneMillion
-    ? ONE_MILLION_CONTEXT_WINDOW_TOKENS
-    : DEFAULT_CONTEXT_WINDOW_TOKENS;
+interface ContextUsage {
+  used: number;
+  limit: number;
+  percent: number;
+  bar: string;
+  source: 'context-report' | 'token-usage';
+}
+
+function parseTokenCount(raw: string): number | null {
+  const match = raw.trim().match(/^([\d,.]+)\s*([kKmM])?$/);
+  if (!match) return null;
+  const value = Number.parseFloat(match[1].replace(/,/g, ''));
+  if (!Number.isFinite(value)) return null;
+  const suffix = match[2]?.toLowerCase();
+  if (suffix === 'k') return value * 1_000;
+  if (suffix === 'm') return value * 1_000_000;
+  return value;
+}
+
+function formatCompactTokens(tokens: number): string {
+  if (tokens >= 1_000_000) {
+    const value = tokens / 1_000_000;
+    return `${Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)}m`;
+  }
+  if (tokens >= 1_000) {
+    const value = tokens / 1_000;
+    return `${Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)}k`;
+  }
+  return Math.round(tokens).toLocaleString();
+}
+
+function buildContextUsage(used: number, limit: number, source: ContextUsage['source'], reportedPercent?: number): ContextUsage {
   const ratio = limit > 0 ? Math.min(1, used / limit) : 0;
-  const percent = Math.max(1, Math.round(ratio * 100));
+  const percent = reportedPercent ?? Math.max(1, Math.round(ratio * 100));
   const filled = Math.max(0, Math.min(10, Math.round(ratio * 10)));
   return {
     used,
     limit,
     percent,
     bar: `${'█'.repeat(filled)}${'░'.repeat(10 - filled)}`,
+    source,
+  };
+}
+
+function parseLatestContextReport(logs: LogEntry[]): ContextUsage | null {
+  for (let i = logs.length - 1; i >= 0; i--) {
+    const content = logs[i].content;
+    if (!content.includes('Context Usage')) continue;
+
+    const match = content.match(/Tokens:\s*([\d,.]+\s*[kKmM]?)\s*\/\s*([\d,.]+\s*[kKmM]?)(?:\s*\((\d+)%\))?/);
+    if (!match) continue;
+
+    const used = parseTokenCount(match[1]);
+    const limit = parseTokenCount(match[2]);
+    const percent = match[3] ? Number.parseInt(match[3], 10) : undefined;
+    if (used == null || limit == null || limit <= 0) continue;
+
+    return buildContextUsage(used, limit, 'context-report', Number.isFinite(percent) ? percent : undefined);
+  }
+  return null;
+}
+
+function buildUsageSummary(job: Job, logs: LogEntry[]) {
+  const contextUsage = parseLatestContextReport(logs)
+    ?? (job.tokenUsage
+      ? buildContextUsage(
+        job.tokenUsage.input + job.tokenUsage.output,
+        job.context?.oneMillion ? ONE_MILLION_CONTEXT_WINDOW_TOKENS : DEFAULT_CONTEXT_WINDOW_TOKENS,
+        'token-usage',
+      )
+      : null);
+
+  if (!contextUsage && job.costUsd == null && !job.sessionId) return null;
+
+  return {
+    tokensLabel: contextUsage
+      ? contextUsage.source === 'context-report'
+        ? `${formatCompactTokens(contextUsage.used)} / ${formatCompactTokens(contextUsage.limit)}`
+        : Math.round(contextUsage.used).toLocaleString()
+      : null,
+    contextUsage,
   };
 }
 
@@ -1708,7 +1775,7 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
       : canResumeWithContext
         ? 'Continue'
         : 'New Turn';
-  const contextUsage = buildContextUsage(job);
+  const usageSummary = buildUsageSummary(job, logs);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
@@ -1811,19 +1878,19 @@ export function JobDetail({ job, logs, projectId, onNewJob, onSelectJob, allJobs
             </div>
           );
         })()}
-        {job.tokenUsage && (
+        {usageSummary && (
           <div className="job-usage-row">
-            <span>Tokens: {(job.tokenUsage.input + job.tokenUsage.output).toLocaleString()}</span>
+            {usageSummary.tokensLabel && <span>Tokens: {usageSummary.tokensLabel}</span>}
             {job.costUsd != null && <span>Cost: ${job.costUsd.toFixed(4)}</span>}
             {job.sessionId && <span>Session: {job.sessionId.slice(0, 8)}</span>}
-            {contextUsage && (
+            {usageSummary.contextUsage && (
               <span
                 className="ctx-usage"
-                title={`Estimated context usage: ${contextUsage.used.toLocaleString()} / ${contextUsage.limit.toLocaleString()} tokens`}
+                title={`${usageSummary.contextUsage.source === 'context-report' ? 'Context usage from /context' : 'Estimated context usage'}: ${Math.round(usageSummary.contextUsage.used).toLocaleString()} / ${Math.round(usageSummary.contextUsage.limit).toLocaleString()} tokens`}
               >
                 <span>ctx</span>
-                <span className="ctx-usage-bar">[{contextUsage.bar}]</span>
-                <span>{contextUsage.percent}%</span>
+                <span className="ctx-usage-bar">[{usageSummary.contextUsage.bar}]</span>
+                <span>{usageSummary.contextUsage.percent}%</span>
               </span>
             )}
           </div>

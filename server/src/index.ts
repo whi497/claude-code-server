@@ -5,17 +5,27 @@ import cors from 'cors';
 import { v4 as uuid } from 'uuid';
 import fs from 'fs';
 import path from 'path';
-import { execFile } from 'child_process';
+import os from 'os';
+import { execFile, spawnSync } from 'child_process';
 import { promisify } from 'util';
 import * as pty from 'node-pty';
 import { query, forkSession, getSessionMessages } from '@anthropic-ai/claude-agent-sdk';
 import { createRequire } from 'module';
-import type { Job, Project, LogEntry, JobStatus, ApprovalRequest, ApprovalResponse, ApprovalType, ApprovalStatus, ImportProgress, ImportResult, LocalProject, Attachment, AttachmentMediaType, AppSettings, ModelOption, ModelShortcutSettings, RequestLogEntry, EffortLevel } from './types.js';
+import type { Job, Project, LogEntry, JobStatus, ApprovalRequest, ApprovalResponse, ApprovalType, ApprovalStatus, ImportProgress, ImportResult, LocalProject, Attachment, AttachmentMediaType, AppSettings, ClaudeCodeSettings, ModelOption, ModelShortcutSettings, RequestLogEntry, EffortLevel } from './types.js';
 import { discoverLocalProjects, parseClaudeSession } from './claude-importer.js';
 
 // Resolve the SDK's built-in CLI path at startup (before cwd changes).
 // Newer SDKs ship a native optional package; older layouts used cli.js.
 const require = createRequire(import.meta.url);
+
+function canLaunchExecutable(executablePath: string): boolean {
+  const result = spawnSync(executablePath, ['--version'], {
+    encoding: 'utf8',
+    timeout: 5000,
+    stdio: 'pipe',
+  });
+  return !result.error && result.status === 0;
+}
 
 function resolveClaudeCodeExecutable(): string | undefined {
   const ext = process.platform === 'win32' ? '.exe' : '';
@@ -28,7 +38,8 @@ function resolveClaudeCodeExecutable(): string | undefined {
 
   for (const packagePath of platformPackages) {
     try {
-      return require.resolve(packagePath);
+      const executablePath = require.resolve(packagePath);
+      if (canLaunchExecutable(executablePath)) return executablePath;
     } catch {
       // Try the next platform package.
     }
@@ -64,10 +75,16 @@ const DEFAULT_REPO_ROOT = fs.existsSync(path.join(process.cwd(), 'server', 'src'
   : path.resolve(process.cwd(), '..');
 const REPO_ROOT = path.resolve(process.env.PROJECT_ROOT ?? DEFAULT_REPO_ROOT);
 const ENV_FILE = path.join(REPO_ROOT, '.env');
+const CLAUDE_CONFIG_DIR = path.resolve(process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), '.claude'));
+const CLAUDE_SETTINGS_FILE = path.join(CLAUDE_CONFIG_DIR, 'settings.json');
 const CUSTOM_MODELS_ENV = 'CLAUDE_CODE_SERVER_MODELS';
 const MODEL_SHORTCUT_KEYS = ['haiku', 'sonnet', 'opus'] as const;
 type ModelShortcutKey = typeof MODEL_SHORTCUT_KEYS[number];
 type ModelSettingsInput = Partial<Record<ModelShortcutKey, unknown>>;
+type ClaudeCodeSettingsInput = {
+  autoCompactEnabled?: unknown;
+  autoCompactWindow?: unknown;
+};
 type CachedSlashCommand = { name: string; description: string; argumentHint: string; aliases?: string[] };
 
 const EMPTY_MODEL_SHORTCUTS: ModelShortcutSettings = {
@@ -76,24 +93,29 @@ const EMPTY_MODEL_SHORTCUTS: ModelShortcutSettings = {
   opus: '',
 };
 
+const DEFAULT_MODEL_IDS: Record<ModelShortcutKey, string> = {
+  haiku: 'claude-3-5-haiku-20241022',
+  sonnet: 'claude-sonnet-4-6',
+  opus: 'claude-opus-4-6',
+};
+
 const MODEL_SHORTCUT_META: Record<ModelShortcutKey, { displayName: string; fallbackValue: string; description: string }> = {
   haiku: {
     displayName: 'Haiku',
-    fallbackValue: 'haiku',
-    description: 'Fast lightweight Claude Code model alias.',
+    fallbackValue: DEFAULT_MODEL_IDS.haiku,
+    description: 'Fast lightweight Claude model.',
   },
   sonnet: {
     displayName: 'Sonnet',
-    fallbackValue: 'sonnet',
-    description: 'Balanced Claude Code model alias for daily coding work.',
+    fallbackValue: DEFAULT_MODEL_IDS.sonnet,
+    description: 'Balanced Claude model for daily coding work.',
   },
   opus: {
     displayName: 'Opus',
-    fallbackValue: 'opus',
-    description: 'Most capable Claude Code model alias for complex work.',
+    fallbackValue: DEFAULT_MODEL_IDS.opus,
+    description: 'Most capable Claude model for complex work.',
   },
 };
-const ONE_MILLION_CONTEXT_BETA = 'context-1m-2025-08-07' as const;
 const EFFORT_LEVELS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max'];
 const EFFORT_LEVEL_SET = new Set<string>(EFFORT_LEVELS);
 const SDK_COMMAND_METADATA: Record<string, Pick<CachedSlashCommand, 'description' | 'argumentHint'>> = {
@@ -192,6 +214,76 @@ async function updateEnvFile(updates: Record<string, string | undefined>) {
 
   await fsp.writeFile(ENV_FILE, `${nextLines.join('\n')}\n`, { mode: 0o600 });
   await fsp.chmod(ENV_FILE, 0o600).catch(() => {});
+}
+
+function readClaudeSettingsObject(): Record<string, unknown> {
+  if (!fs.existsSync(CLAUDE_SETTINGS_FILE)) return {};
+  try {
+    const parsed = JSON.parse(fs.readFileSync(CLAUDE_SETTINGS_FILE, 'utf-8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function normalizeClaudeCodeSettings(raw = readClaudeSettingsObject()): ClaudeCodeSettings {
+  const settings: ClaudeCodeSettings = { settingsPath: CLAUDE_SETTINGS_FILE };
+  if (typeof raw.autoCompactEnabled === 'boolean') {
+    settings.autoCompactEnabled = raw.autoCompactEnabled;
+  }
+  if (typeof raw.autoCompactWindow === 'number' && Number.isFinite(raw.autoCompactWindow) && raw.autoCompactWindow > 0) {
+    settings.autoCompactWindow = raw.autoCompactWindow;
+  }
+  return settings;
+}
+
+function buildClaudeQuerySettings(): Record<string, unknown> | undefined {
+  const settings = normalizeClaudeCodeSettings();
+  const querySettings: Record<string, unknown> = {};
+  if (settings.autoCompactEnabled !== undefined) {
+    querySettings.autoCompactEnabled = settings.autoCompactEnabled;
+  }
+  if (settings.autoCompactWindow !== undefined) {
+    querySettings.autoCompactWindow = settings.autoCompactWindow;
+  }
+  return Object.keys(querySettings).length > 0 ? querySettings : undefined;
+}
+
+async function updateClaudeCodeSettings(input: unknown) {
+  if (input === undefined) return;
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error('claudeCode must be an object');
+  }
+
+  const updates = input as ClaudeCodeSettingsInput;
+  const next = readClaudeSettingsObject();
+
+  if (updates.autoCompactEnabled !== undefined) {
+    if (typeof updates.autoCompactEnabled !== 'boolean') {
+      throw new Error('autoCompactEnabled must be a boolean');
+    }
+    next.autoCompactEnabled = updates.autoCompactEnabled;
+  }
+
+  if (updates.autoCompactWindow !== undefined) {
+    if (updates.autoCompactWindow === null || updates.autoCompactWindow === '') {
+      delete next.autoCompactWindow;
+    } else if (
+      typeof updates.autoCompactWindow === 'number'
+      && Number.isFinite(updates.autoCompactWindow)
+      && updates.autoCompactWindow > 0
+    ) {
+      next.autoCompactWindow = Math.round(updates.autoCompactWindow);
+    } else {
+      throw new Error('autoCompactWindow must be a positive number or blank');
+    }
+  }
+
+  await fsp.mkdir(path.dirname(CLAUDE_SETTINGS_FILE), { recursive: true });
+  await fsp.writeFile(CLAUDE_SETTINGS_FILE, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+  await fsp.chmod(CLAUDE_SETTINGS_FILE, 0o600).catch(() => {});
 }
 
 function maskSecret(value: string | undefined): string | undefined {
@@ -301,6 +393,7 @@ function getAppSettings(): AppSettings {
     modelShortcuts: modelSettings.modelShortcuts,
     customModels: modelSettings.customModels,
     models: parseConfiguredModels(),
+    claudeCode: normalizeClaudeCodeSettings(),
   };
 }
 
@@ -336,6 +429,8 @@ const QUESTION_DISCARD_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
 const idleTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const IDLE_GRACE_MS = 5 * 60 * 1000; // 5 minutes
 
+const SENSITIVE_PAYLOAD_KEY_RE = /(?:api[_-]?key|token|secret|password|authorization|credential|cookie)/i;
+
 function sanitizeRequestPayload(value: unknown): unknown {
   if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return value;
   if (typeof value === 'undefined') return '[undefined]';
@@ -348,7 +443,9 @@ function sanitizeRequestPayload(value: unknown): unknown {
   const input = value as Record<string, unknown>;
   const output: Record<string, unknown> = {};
   for (const [key, item] of Object.entries(input)) {
-    if (key === 'data' && typeof item === 'string') {
+    if (SENSITIVE_PAYLOAD_KEY_RE.test(key)) {
+      output[key] = '[redacted]';
+    } else if (key === 'data' && typeof item === 'string') {
       output[key] = `[base64:${item.length} chars]`;
     } else if (key === 'source' && item && typeof item === 'object' && (item as Record<string, unknown>).type === 'base64') {
       const source = item as Record<string, unknown>;
@@ -781,16 +878,22 @@ interface RunJobOptions {
 }
 
 const FALLBACK_MODEL_OPTIONS: ModelOption[] = [
-  { value: 'haiku', displayName: 'Haiku', description: 'Fastest lightweight model for simpler or lower-latency work.' },
-  { value: 'sonnet', displayName: 'Sonnet', description: 'Balanced speed and capability for most coding work.' },
-  { value: 'opus', displayName: 'Opus', description: 'Highest capability for more complex reasoning and coding tasks.' },
+  { value: DEFAULT_MODEL_IDS.haiku, displayName: 'Haiku', description: 'Fastest lightweight model for simpler or lower-latency work.' },
+  { value: DEFAULT_MODEL_IDS.sonnet, displayName: 'Sonnet', description: 'Balanced speed and capability for most coding work.' },
+  { value: DEFAULT_MODEL_IDS.opus, displayName: 'Opus', description: 'Highest capability for more complex reasoning and coding tasks.' },
 ];
 
 function normalizeJobModel(model: unknown): string | undefined {
   if (typeof model !== 'string') return undefined;
   const trimmed = model.trim();
   if (!trimmed || trimmed === 'default') return undefined;
+  const shortcut = normalizeShortcutName(trimmed);
+  if (shortcut) return DEFAULT_MODEL_IDS[shortcut];
   return trimmed;
+}
+
+function resolveJobModel(job: Pick<Job, 'model' | 'context'>): string | undefined {
+  return normalizeJobModel(job.model) ?? (job.context?.oneMillion ? DEFAULT_MODEL_IDS.opus : undefined);
 }
 
 function normalizeModelDisplayName(displayName: unknown): string | undefined {
@@ -901,12 +1004,24 @@ async function runJob(job: Job, runOptions: RunJobOptions = {}) {
   };
 
   try {
+    const claudeQuerySettings = buildClaudeQuerySettings();
+    const queryModel = resolveJobModel(job);
+    const queryEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      ...(job.context?.oneMillion
+        ? {
+            DISABLE_COMPACT: '1',
+            CLAUDE_CODE_MAX_CONTEXT_TOKENS: '1000000',
+          }
+        : {}),
+    };
     const opts: Parameters<typeof query>[0]['options'] = {
       cwd,
       abortController,
       ...(CLAUDE_CODE_EXECUTABLE ? { pathToClaudeCodeExecutable: CLAUDE_CODE_EXECUTABLE } : {}),
-      ...(job.model ? { model: job.model } : {}),
-      ...(job.context?.oneMillion ? { betas: [ONE_MILLION_CONTEXT_BETA] } : {}),
+      ...(queryModel ? { model: queryModel } : {}),
+      ...(claudeQuerySettings ? { settings: claudeQuerySettings as any } : {}),
+      env: queryEnv,
       allowedTools: ['Read', 'Edit', 'Write', 'Bash', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode'],
       disallowedTools: [],
       // No permissionMode: 'bypassPermissions' — canUseTool handles all permissions
@@ -944,6 +1059,12 @@ async function runJob(job: Job, runOptions: RunJobOptions = {}) {
         : `── Forked after assistant turn ${job.forkedFrom.turnIndex} ──` });
     } else {
       addLog({ type: 'system', content: `Starting ${isSession ? 'session' : 'job'} in ${cwd}` });
+    }
+    if (job.context?.oneMillion) {
+      addLog({
+        type: 'system',
+        content: '1M context requested; Claude Code compact is disabled for this run so the local context limit override can take effect.',
+      });
     }
     if (!activateOnly) {
       addLog({ type: 'user', content: job.prompt, ...(job.attachments?.length ? { meta: { attachments: job.attachments.map(a => ({ filename: a.filename, mediaType: a.mediaType, size: a.size })) } } : {}) });
@@ -1294,7 +1415,7 @@ app.get('/api/settings', (_req, res) => {
 });
 
 app.put('/api/settings', async (req, res) => {
-  const { anthropicApiKey, clearAnthropicApiKey, anthropicBaseUrl, modelsText, modelShortcuts, customModels } = req.body ?? {};
+  const { anthropicApiKey, clearAnthropicApiKey, anthropicBaseUrl, modelsText, modelShortcuts, customModels, claudeCode } = req.body ?? {};
   const envUpdates: Record<string, string | undefined> = {};
 
   if (clearAnthropicApiKey === true) {
@@ -1356,10 +1477,13 @@ app.put('/api/settings', async (req, res) => {
   }
 
   try {
+    await updateClaudeCodeSettings(claudeCode);
     await updateEnvFile(envUpdates);
     res.json(getAppSettings());
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    const message = err.message ?? 'Failed to update settings';
+    const status = message.includes('must be') ? 400 : 500;
+    res.status(status).json({ error: message });
   }
 });
 

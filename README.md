@@ -189,7 +189,7 @@ Browser (React + TypeScript)
 |---------------------|---------|-------------|
 | `ANTHROPIC_API_KEY` | *(required)* | Your Anthropic API key |
 | `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | Custom API endpoint (proxy, gateway) |
-| `CLAUDE_CODE_SERVER_MODELS` | *(Claude Code aliases + SDK list)* | Optional comma- or newline-separated model list shown in model pickers. Use `model-name \| Haiku`, `model-name \| Sonnet`, or `model-name \| Opus` to map common labels; plain entries are shown as additional models. |
+| `CLAUDE_CODE_SERVER_MODELS` | *(Claude model IDs + SDK list)* | Optional comma- or newline-separated model list shown in model pickers. Use `model-name \| Haiku`, `model-name \| Sonnet`, or `model-name \| Opus` to map common labels; plain entries are shown as additional models. Defaults use exact model IDs, including `claude-sonnet-4-6` and `claude-opus-4-6`. |
 | `PORT` | `3001` | Server port |
 | `PROJECTS_ROOT` | `./projects` | Root directory for project workspaces |
 

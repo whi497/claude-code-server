@@ -43,6 +43,12 @@ export interface ModelShortcutSettings {
   opus: string;
 }
 
+export interface ClaudeCodeSettings {
+  settingsPath: string;
+  autoCompactEnabled?: boolean;
+  autoCompactWindow?: number;
+}
+
 export interface AppSettings {
   anthropicApiKeySet: boolean;
   anthropicApiKeyPreview?: string;
@@ -51,6 +57,7 @@ export interface AppSettings {
   modelShortcuts: ModelShortcutSettings;
   customModels: string[];
   models: ModelOption[];
+  claudeCode: ClaudeCodeSettings;
 }
 
 export interface Job {

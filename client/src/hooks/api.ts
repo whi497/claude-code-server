@@ -18,6 +18,10 @@ export const api = {
     modelsText?: string;
     modelShortcuts?: import('../types').ModelShortcutSettings;
     customModels?: string[];
+    claudeCode?: {
+      autoCompactEnabled?: boolean;
+      autoCompactWindow?: number | null;
+    };
   }): Promise<import('../types').AppSettings> =>
     request('/settings', { method: 'PUT', body: JSON.stringify(settings) }),
   getProjects: () => request('/projects'),
